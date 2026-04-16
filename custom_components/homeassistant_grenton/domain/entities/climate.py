@@ -30,7 +30,12 @@ class GrentonEntityClimate(BaseGrentonEntity, ClimateEntity):  # pyright: ignore
 
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
     _attr_preset_modes = [PRESET_NONE, PRESET_AWAY, PRESET_SCHEDULE]
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.PRESET_MODE
+        | ClimateEntityFeature.TURN_ON
+        | ClimateEntityFeature.TURN_OFF
+    )
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
 
     def __init__(
@@ -134,6 +139,14 @@ class GrentonEntityClimate(BaseGrentonEntity, ClimateEntity):  # pyright: ignore
         await self.coordinator.execute_action(self._action_set_target_temperature)
         self._action_set_mode.value = str(GRENTON_MODE_MANUAL)
         await self.coordinator.execute_action(self._action_set_mode)
+
+    async def async_turn_on(self) -> None:
+        self._action_set_state.value = "1"
+        await self.coordinator.execute_action(self._action_set_state)
+
+    async def async_turn_off(self) -> None:
+        self._action_set_state.value = "0"
+        await self.coordinator.execute_action(self._action_set_state)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._action_set_state.value = "0" if hvac_mode == HVACMode.OFF else "1"
