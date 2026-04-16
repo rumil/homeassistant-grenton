@@ -119,6 +119,9 @@
     },
     "camera": {
       "name": "Kamera"
+    },
+    "thermostat_v2": {
+      "name": "Termostat V2"
     }
   },
   

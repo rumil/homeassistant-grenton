@@ -31,6 +31,8 @@ from .device_multisensor import DeviceMultisensorMapper
 from .device_roller_shutter import DeviceRollerShutterMapper
 from .device_roller_shutter_v3 import DeviceRollerShutterV3Mapper
 from .device_camera import DeviceCameraMapper
+from .device_thermostat_v2 import DeviceThermostatV2Mapper
+from ..dto.widgets.thermostat_v2 import GrentonWidgetThermostatV2Dto
 
 
 class DeviceMapper:
@@ -65,7 +67,9 @@ class DeviceMapper:
             return DeviceRollerShutterV3Mapper.to_domain(dto, coordinator)
         if isinstance(dto, GrentonWidgetCameraDto): # type: ignore
             return DeviceCameraMapper.to_domain(dto, coordinator)
-        
+        if isinstance(dto, GrentonWidgetThermostatV2Dto):
+            return DeviceThermostatV2Mapper.to_domain(dto, coordinator)
+
         raise ValueError(f"Unknown widget type: {type(dto)}")
 
     @staticmethod
