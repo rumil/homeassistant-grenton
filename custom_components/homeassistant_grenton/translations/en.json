@@ -23,6 +23,22 @@
 
   "options": {
     "step": {
+      "menu": {
+        "title": "Grenton",
+        "menu_options": {
+          "entity_list": "Configure entities",
+          "rediscover": "Rediscover devices"
+        }
+      },
+      "rediscover": {
+        "title": "Rediscover Devices",
+        "description": "Re-fetch the device list from Grenton Object Manager. New devices will be added and existing entity configuration will be preserved. Current credentials are pre-filled — update them if they have changed.",
+        "data": {
+          "ip_address": "IP Address",
+          "port": "Port",
+          "pin": "PIN"
+        }
+      },
       "entity_list": {
         "title": "Configure Entities",
         "description": "Select an entity to configure its properties.",
@@ -72,6 +88,12 @@
           "device_class": "Device Class"
         }
       }
+    },
+    "error": {
+      "invalid_auth": "Invalid PIN or authentication failed.",
+      "invalid_data": "Data from the device was missing or malformed.",
+      "cannot_connect": "Unable to connect to the Grenton Object Manager at the given address.",
+      "unknown": "Unknown error occurred."
     },
     "abort": {
       "no_configurable_entities": "No configurable entities found.",

@@ -4,6 +4,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlow
+from homeassistant.const import CONF_IP_ADDRESS, CONF_PIN, CONF_PORT
 from homeassistant.helpers import selector
 
 class GrentonOptionsFlow(OptionsFlow):
@@ -25,8 +26,66 @@ class GrentonOptionsFlow(OptionsFlow):
         raise AttributeError(name)
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Manage the options - show list of entities to configure."""
-        return await self.async_step_entity_list(user_input)
+        """Show main options menu."""
+        return self.async_show_menu(
+            step_id="menu",
+            menu_options=["entity_list", "rediscover"],
+        )
+
+    async def async_step_rediscover(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Re-fetch the Grenton mobile interface and reload the integration."""
+        from .integration_config import GrentonConfigEntry
+        from .domain.api.object_manager import (
+            GrentonObjectManagerApi,
+            GrentonObjectManagerAuthError,
+            GrentonObjectManagerConnectionError,
+            GrentonObjectManagerDataError,
+        )
+
+        config_entry: GrentonConfigEntry = self.config_entry  # type: ignore
+        config_data = config_entry.data
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            ip_address = user_input[CONF_IP_ADDRESS]
+            port = user_input[CONF_PORT]
+            pin = user_input[CONF_PIN]
+            base_url = f"http://{ip_address}:{port}"
+
+            try:
+                async with GrentonObjectManagerApi(base_url) as api:
+                    new_interface = await api.fetch_mobile_interface(pin)
+            except GrentonObjectManagerAuthError:
+                errors["base"] = "invalid_auth"
+            except GrentonObjectManagerConnectionError:
+                errors["base"] = "cannot_connect"
+            except GrentonObjectManagerDataError:
+                errors["base"] = "invalid_data"
+            except Exception:
+                errors["base"] = "unknown"
+            else:
+                self.hass.config_entries.async_update_entry(
+                    config_entry,
+                    data={
+                        CONF_IP_ADDRESS: ip_address,
+                        CONF_PORT: port,
+                        CONF_PIN: pin,
+                        "interface": new_interface,
+                    },
+                )
+                self.hass.config_entries.async_schedule_reload(config_entry.entry_id)
+                return self.async_create_entry(title="", data=config_entry.options)
+
+        return self.async_show_form(
+            step_id="rediscover",
+            data_schema=vol.Schema({
+                vol.Required(CONF_IP_ADDRESS, default=config_data.get(CONF_IP_ADDRESS, "")): str,
+                vol.Required(CONF_PORT, default=config_data.get(CONF_PORT, "9998")): str,
+                vol.Required(CONF_PIN, default=config_data.get(CONF_PIN, "")): str,
+            }),
+            errors=errors,
+        )
 
     async def async_step_entity_list(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show list of configurable entities."""

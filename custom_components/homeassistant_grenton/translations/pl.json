@@ -23,6 +23,22 @@
 
   "options": {
     "step": {
+      "menu": {
+        "title": "Grenton",
+        "menu_options": {
+          "entity_list": "Konfiguruj encje",
+          "rediscover": "Wykryj urządzenia ponownie"
+        }
+      },
+      "rediscover": {
+        "title": "Wykryj urządzenia ponownie",
+        "description": "Pobierz ponownie listę urządzeń z Grenton Object Manager. Nowe urządzenia zostaną dodane, a istniejąca konfiguracja encji zostanie zachowana. Aktualne dane dostępu są wstępnie wypełnione — zaktualizuj je, jeśli uległy zmianie.",
+        "data": {
+          "ip_address": "Adres IP",
+          "port": "Port",
+          "pin": "PIN"
+        }
+      },
       "entity_list": {
         "title": "Konfiguruj encje",
         "description": "Wybierz encję, aby skonfigurować jej właściwości.",
@@ -72,6 +88,12 @@
           "device_class": "Klasa urządzenia"
         }
       }
+    },
+    "error": {
+      "invalid_auth": "Nieprawidłowy PIN lub błąd uwierzytelniania.",
+      "invalid_data": "Dane z urządzenia były niekompletne lub nieprawidłowe.",
+      "cannot_connect": "Nie można połączyć się z Grenton Object Manager pod podanym adresem.",
+      "unknown": "Wystąpił nieznany błąd."
     },
     "abort": {
       "no_configurable_entities": "Nie znaleziono konfigurowalnych encji.",
