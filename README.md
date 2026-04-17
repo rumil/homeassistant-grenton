@@ -75,14 +75,25 @@ Your support helps maintain features, fix bugs, and improve documentation.
    - **Port**: Port number (default: `9998`)
    - **PIN**: Your Object Manager PIN code
 
+### Adding New Devices
+
+When you add a new device in the Grenton Object Manager, use **Rediscover Devices** to pick it up in Home Assistant without removing and re-adding the integration. This preserves all existing entity configuration (device classes, units, etc.).
+
+1. Navigate to **Settings** → **Devices & Services** → **Grenton**
+2. Click **Configure**
+3. Select **Rediscover devices**
+4. Confirm or update your connection credentials (IP address, port, PIN)
+5. Click **Submit** — the integration will reload and new devices will appear
+
 ### Entity Configuration
 
 After initial setup, you can customize individual entities:
 
 1. Navigate to **Settings** → **Devices & Services** → **Grenton**
 2. Click **Configure** on the integration
-3. Select an entity from the dropdown menu
-4. Configure entity properties:
+3. Select **Configure entities**
+4. Select an entity from the dropdown menu
+5. Configure entity properties:
    - **Sensors**: Choose device class and unit of measurement
    - **Sliders (Numbers)**: Set display mode, device class, and unit
    - **Binary Sensors**: Select appropriate device class
