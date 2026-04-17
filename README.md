@@ -41,6 +41,7 @@ Your support helps maintain features, fix bugs, and improve documentation.
 | **ROLLER_SHUTTER** | Legacy roller shutter exposed as `sensor` (state enum) plus a `button` action entity. |
 | **ROLLER_SHUTTER_V3** | Roller shutter V3 exposed as a single `cover` entity (position; lamel/tilt when available). |
 | **CAMERA** | Camera stream exposed as `camera`. |
+| **THERMOSTAT_V2** | Thermostat exposed as `climate` with current/target temperature, heating state, and preset modes (manual, away, schedule). |
 
 ## 🚀 Installation
 
