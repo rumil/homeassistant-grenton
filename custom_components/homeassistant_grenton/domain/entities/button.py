@@ -15,13 +15,14 @@ class GrentonEntityButton(BaseGrentonEntity, ButtonEntity): # pyright: ignore[re
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         action_click: GrentonAction,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize button entity."""
         ButtonEntity.__init__(self)
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         self.action_click = action_click
 
     async def async_press(self, **kwargs: Any):

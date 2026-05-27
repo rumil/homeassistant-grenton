@@ -103,12 +103,13 @@ class GrentonEntityValue( # pyright: ignore[reportIncompatibleVariableOverride]
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         state_object: GrentonStateObject,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize value sensor entity."""
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         ConfigurableEntity.__init__(self)
         SensorEntity.__init__(self)
 

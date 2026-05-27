@@ -14,8 +14,8 @@ class DeviceOnOffMapper:
     """Mapper for GrentonWidgetOnOffDto to GrentonDeviceOnOff."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetOnOffDto, coordinator: GrentonCoordinator) -> GrentonDeviceOnOff:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetOnOffDto, coordinator: GrentonCoordinator) -> list[GrentonDeviceOnOff]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceOnOff(
             type=dto.type,
             id=dto.id,
@@ -40,7 +40,7 @@ class DeviceOnOffMapper:
                 entity = GrentonEntityBistableSwitch(
                     coordinator=coordinator,
                     id=f"{dto.id}_{component.rowId}",
-                    label=component.label,
+                    name=component.label,
                     unit=component.unit,
                     state_object=GrentonStateObject.from_dto(component.state),
                     action_on=action_on,
@@ -51,4 +51,4 @@ class DeviceOnOffMapper:
                 entities.append(entity)
 
         device.entities = entities
-        return device
+        return [device]

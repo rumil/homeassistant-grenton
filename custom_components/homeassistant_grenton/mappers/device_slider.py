@@ -14,20 +14,20 @@ class DeviceSliderMapper:
     """Mapper for GrentonWidgetSliderDto to GrentonDeviceSlider."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetSliderDto, coordinator: GrentonCoordinator) -> GrentonDeviceSlider:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetSliderDto, coordinator: GrentonCoordinator) -> list[GrentonDeviceSlider]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceSlider(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.label,
         )
 
         entities: list[BaseGrentonEntity] = []
-        
+
         slider_entity = GrentonEntitySlider(
             coordinator=coordinator,
             id=f"{dto.id}_slider",
-            label=dto.label,
             min=dto.min,
             max=dto.max,
             precision=dto.precision,
@@ -42,7 +42,7 @@ class DeviceSliderMapper:
             button_entity = GrentonEntityButton(
                 coordinator=coordinator,
                 id=f"{dto.id}_button",
-                label=dto.label,
+                translation_key="button",
                 action_click=GrentonAction.from_dto(dto.object.clickAction),
                 device_info=device.device_info,
             )
@@ -50,4 +50,4 @@ class DeviceSliderMapper:
             entities.append(button_entity)
         
         device.entities = entities
-        return device
+        return [device]

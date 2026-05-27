@@ -11,21 +11,21 @@ class DeviceValueV2Mapper:
     """Mapper for GrentonWidgetValueV2Dto to GrentonDeviceValueV2."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetValueV2Dto, coordinator: GrentonCoordinator) -> GrentonDeviceValueV2:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetValueV2Dto, coordinator: GrentonCoordinator) -> list[GrentonDeviceValueV2]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceValueV2(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.label,
         )
-        
+
         entity = GrentonEntityValue(
             coordinator=coordinator,
             id=f"{dto.id}_0",
-            label=dto.label,
             state_object=GrentonStateObject.from_dto(dto.object.value),
             device_info=device.device_info,
         )
-        
+
         device.entities = [entity]
-        return device
+        return [device]

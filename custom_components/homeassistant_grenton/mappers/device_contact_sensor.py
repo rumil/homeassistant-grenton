@@ -14,20 +14,20 @@ class DeviceContactSensorMapper:
     """Mapper for GrentonWidgetContactSensorDto to GrentonDeviceContactSensor."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetContactSensorDto, coordinator: GrentonCoordinator) -> GrentonDeviceContactSensor:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetContactSensorDto, coordinator: GrentonCoordinator) -> list[GrentonDeviceContactSensor]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceContactSensor(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.label,
         )
-        
+
         entities: list[BaseGrentonEntity] = []
 
         binary_sensor = GrentonEntityBinarySensor(
             coordinator=coordinator,
             id=f"{dto.id}_binary_sensor",
-            label=dto.label,
             reversed=dto.reverseState,
             state_object=GrentonStateObject.from_dto(dto.object.value),
             device_info=device.device_info,
@@ -39,7 +39,7 @@ class DeviceContactSensorMapper:
             button = GrentonEntityButton(
                 coordinator=coordinator,
                 id=f"{dto.id}_button",
-                label=dto.label,
+                translation_key="button",
                 action_click=GrentonAction.from_dto(dto.object.clickAction),
                 device_info=device.device_info,
             )
@@ -47,4 +47,4 @@ class DeviceContactSensorMapper:
             entities.append(button)
 
         device.entities = entities
-        return device
+        return [device]

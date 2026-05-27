@@ -10,21 +10,21 @@ class DeviceCameraMapper:
     """Mapper for GrentonWidgetCameraDto to GrentonDeviceCamera."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetCameraDto, coordinator: GrentonCoordinator) -> GrentonDeviceCamera:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetCameraDto, coordinator: GrentonCoordinator) -> list[GrentonDeviceCamera]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceCamera(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.components[0].label,
         )
-        
+
         entity = GrentonEntityCamera(
             coordinator=coordinator,
             id=f"{dto.id}_0",
-            label=dto.components[0].label,
             stream=dto.components[0].value,
             device_info=device.device_info,
         )
         
         device.entities = [entity]
-        return device
+        return [device]

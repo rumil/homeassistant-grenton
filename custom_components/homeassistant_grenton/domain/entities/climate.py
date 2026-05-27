@@ -42,7 +42,6 @@ class GrentonEntityClimate(BaseGrentonEntity, ClimateEntity):  # pyright: ignore
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         state_current_temperature: GrentonStateObject,
         state_target_temperature: GrentonStateObject,
         state_min_temperature: GrentonStateObject,
@@ -53,10 +52,12 @@ class GrentonEntityClimate(BaseGrentonEntity, ClimateEntity):  # pyright: ignore
         action_set_target_temperature: GrentonAction,
         action_set_state: GrentonAction,
         action_set_mode: GrentonAction,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         ClimateEntity.__init__(self)
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         self._state_current_temperature = state_current_temperature
         self._state_target_temperature = state_target_temperature
         self._state_min_temperature = state_min_temperature

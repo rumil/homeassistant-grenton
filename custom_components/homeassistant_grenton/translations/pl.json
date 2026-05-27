@@ -157,6 +157,32 @@
           "locked": "zablokowane",
           "unknown": "nieznany"
         }
+      },
+      "temperature": {
+        "name": "Temperatura"
+      },
+      "humidity": {
+        "name": "Wilgotność"
+      },
+      "co2": {
+        "name": "CO2"
+      },
+      "voc": {
+        "name": "VOC"
+      },
+      "illuminance": {
+        "name": "Natężenie oświetlenia"
+      },
+      "pressure": {
+        "name": "Ciśnienie"
+      },
+      "sound": {
+        "name": "Dźwięk"
+      }
+    },
+    "button": {
+      "button": {
+        "name": "Przycisk"
       }
     }
   },

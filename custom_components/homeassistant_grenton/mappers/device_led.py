@@ -15,14 +15,8 @@ class DeviceLedMapper:
     """Mapper for GrentonWidgetLedDto to GrentonDeviceLed."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetLedDto, coordinator: GrentonCoordinator) -> GrentonDeviceLed:
-        """Convert DTO to domain object."""
-        device = GrentonDeviceLed(
-            type=dto.type,
-            id=dto.id,
-            entities=[],
-        )
-
+    def to_domain(dto: GrentonWidgetLedDto, coordinator: GrentonCoordinator) -> list[GrentonDeviceLed]:
+        """Convert DTO to a single-element list of domain devices."""
         on_off_component: GrentonComponentLedButtonDto | None = None
         hue_component: GrentonComponentLedHueDto | None = None
         saturation_component: GrentonComponentLedSaturationDto | None = None
@@ -39,25 +33,31 @@ class DeviceLedMapper:
                 brightness_component = component
 
         if not on_off_component or not hue_component or not saturation_component or not brightness_component:
-            return device  # Incomplete LED components, return device without entities
-        
+            return [GrentonDeviceLed(type=dto.type, id=dto.id, entities=[])]
+
         action_on: GrentonAction | None = None
         action_off: GrentonAction | None = None
         for action_dto in on_off_component.actions or []:
             action = GrentonAction.from_dto(action_dto)
-            
+
             if action.event == GrentonActionEventType.ON:
                 action_on = action
             elif action.event == GrentonActionEventType.OFF:
                 action_off = action
 
         if not action_on or not action_off:
-            return device  # Incomplete LED button actions, return device without entities
-        
+            return [GrentonDeviceLed(type=dto.type, id=dto.id, entities=[])]
+
+        device = GrentonDeviceLed(
+            type=dto.type,
+            id=dto.id,
+            entities=[],
+            name=on_off_component.label,
+        )
+
         entity = GrentonEntityLed(
             coordinator=coordinator,
             id=f"{dto.id}_0",
-            label=on_off_component.label,
             state_object=GrentonStateObject.from_dto(on_off_component.state),
             action_on=action_on,
             action_off=action_off,
@@ -74,4 +74,4 @@ class DeviceLedMapper:
         )
 
         device.entities = [entity]
-        return device
+        return [device]

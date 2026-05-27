@@ -21,7 +21,6 @@ class GrentonEntityLed(BaseGrentonEntity, LightEntity): # pyright: ignore[report
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         state_object: GrentonStateObject,
         action_on: GrentonAction,
         action_off: GrentonAction,
@@ -34,11 +33,13 @@ class GrentonEntityLed(BaseGrentonEntity, LightEntity): # pyright: ignore[report
         brightness_action: GrentonAction,
         brightness_state_object: GrentonStateObject,
         brightness_range: tuple[float, float],
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize dimmer light entity."""
         LightEntity.__init__(self)
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         self.min = min
         self.max = max
         self.state_object = state_object

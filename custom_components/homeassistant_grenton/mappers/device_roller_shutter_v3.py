@@ -12,18 +12,18 @@ class DeviceRollerShutterV3Mapper:
     """Mapper for GrentonWidgetRollerShutterDto to GrentonDeviceRollerShutter."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetRollerShutterV3Dto, coordinator: GrentonCoordinator) -> GrentonDeviceRollerShutterV3:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetRollerShutterV3Dto, coordinator: GrentonCoordinator) -> list[GrentonDeviceRollerShutterV3]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceRollerShutterV3(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.label,
         )
-        
+
         entity = GrentonEntityRollerShutterV3(
             coordinator=coordinator,
             id=dto.id,
-            label=dto.label,
             cover_state=GrentonStateObject.from_dto(dto.object.state),
             cover_position=GrentonStateObject.from_dto(dto.object.position),
             set_position=GrentonAction.from_dto(dto.object.setPositionAction),
@@ -34,4 +34,4 @@ class DeviceRollerShutterV3Mapper:
         )
 
         device.entities = [entity]
-        return device
+        return [device]

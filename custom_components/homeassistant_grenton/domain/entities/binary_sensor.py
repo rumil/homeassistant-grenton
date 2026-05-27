@@ -53,13 +53,14 @@ class GrentonEntityBinarySensor( # pyright: ignore[reportIncompatibleVariableOve
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         reversed: bool,
         state_object: GrentonStateObject,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize binary sensor entity."""
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         ConfigurableEntity.__init__(self)
         BinarySensorEntity.__init__(self)
 
