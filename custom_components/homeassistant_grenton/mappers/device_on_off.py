@@ -1,54 +1,61 @@
-"""Mapper for converting OnOff widget DTO to domain device."""
+"""Mapper for converting OnOff widget DTO to per-component devices."""
 
 from ..coordinator import GrentonCoordinator
 from ..domain.devices.on_off import GrentonDeviceOnOff
 from ..domain.enums import GrentonActionEventType
 from ..domain.action import GrentonAction
 from ..domain.state_object import GrentonStateObject
-from ..domain.entities.base import BaseGrentonEntity
 from ..domain.entities.bistable_switch import GrentonEntityBistableSwitch
 from ..dto.widgets.on_off import GrentonWidgetOnOffDto
 
 
 class DeviceOnOffMapper:
-    """Mapper for GrentonWidgetOnOffDto to GrentonDeviceOnOff."""
+    """Map a GrentonWidgetOnOffDto to one HA device per component.
+
+    ON_OFF widgets carry no widget-level label — only each component has one.
+    We therefore apply the same split strategy as ON_OFF_DOUBLE: one HA
+    device per component, named after its label, with the switch as the
+    primary (nameless) entity.  This produces clean entity_ids like
+    ``switch.living_room_ceiling`` and avoids falling back to the translated
+    type name for the device.
+    """
 
     @staticmethod
     def to_domain(dto: GrentonWidgetOnOffDto, coordinator: GrentonCoordinator) -> list[GrentonDeviceOnOff]:
-        """Convert DTO to a single-element list of domain devices."""
-        device = GrentonDeviceOnOff(
-            type=dto.type,
-            id=dto.id,
-            entities=[],
-        )
-        
-        entities: list[BaseGrentonEntity] = []
+        devices: list[GrentonDeviceOnOff] = []
+
         for component in dto.components:
-            # Find ON and OFF actions
             action_on: GrentonAction | None = None
             action_off: GrentonAction | None = None
             for action_dto in component.actions or []:
                 action = GrentonAction.from_dto(action_dto)
-                
                 if action.event == GrentonActionEventType.ON:
                     action_on = action
                 elif action.event == GrentonActionEventType.OFF:
                     action_off = action
-                    
-            # Ensure both actions are present
-            if action_on and action_off:
-                entity = GrentonEntityBistableSwitch(
-                    coordinator=coordinator,
-                    id=f"{dto.id}_{component.rowId}",
-                    name=component.label,
-                    unit=component.unit,
-                    state_object=GrentonStateObject.from_dto(component.state),
-                    action_on=action_on,
-                    action_off=action_off,
-                    device_info=device.device_info,
-                )
 
-                entities.append(entity)
+            if not (action_on and action_off):
+                continue
 
-        device.entities = entities
-        return [device]
+            entity_id = f"{dto.id}_{component.rowId}"
+            device = GrentonDeviceOnOff(
+                type=dto.type,
+                id=entity_id,
+                entities=[],
+                name=component.label,
+            )
+
+            entity = GrentonEntityBistableSwitch(
+                coordinator=coordinator,
+                id=entity_id,
+                unit=component.unit,
+                state_object=GrentonStateObject.from_dto(component.state),
+                action_on=action_on,
+                action_off=action_off,
+                device_info=device.device_info,
+            )
+
+            device.entities = [entity]
+            devices.append(device)
+
+        return devices
