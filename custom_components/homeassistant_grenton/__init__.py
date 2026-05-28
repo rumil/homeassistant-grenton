@@ -3,6 +3,7 @@ import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
+from homeassistant.helpers import device_registry as dr
 
 from .integration_config import GrentonConfigEntry, GrentonConfigEntryData, RuntimeData
 from .coordinator import GrentonCoordinator
@@ -47,11 +48,49 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: GrentonConfigEntr
     # Store runtime data
     config_entry.runtime_data = RuntimeData(coordinator=coordinator, devices=devices)
 
+    # Reconcile the device registry against the freshly-mapped devices.
+    # Anything still linked to this config entry but no longer present in the
+    # current device set is a leftover (e.g. devices created before the
+    # _DOUBLE widget split, or components removed from the Grenton config).
+    _cleanup_stale_devices(hass, config_entry, devices)
+
     # Setup the coordinator
     await coordinator.async_setup()
-    
+
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
+    return True
+
+
+def _cleanup_stale_devices(
+    hass: HomeAssistant,
+    config_entry: GrentonConfigEntry,
+    devices: list,
+) -> None:
+    """Remove device-registry entries no longer produced by the mappers."""
+    dev_reg = dr.async_get(hass)
+    expected = {("grenton", device.id) for device in devices}
+    for dev in dr.async_entries_for_config_entry(dev_reg, config_entry.entry_id):
+        if not dev.identifiers & expected:
+            _LOGGER.info(
+                "Removing stale Grenton device %s (identifiers=%s)",
+                dev.id,
+                dev.identifiers,
+            )
+            dev_reg.async_update_device(
+                dev.id, remove_config_entry_id=config_entry.entry_id
+            )
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Allow users to manually delete a Grenton device from the UI.
+
+    Acts as a safety net for any orphan the automatic cleanup misses.
+    """
     return True
 
 async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
