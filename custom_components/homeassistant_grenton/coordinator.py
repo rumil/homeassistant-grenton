@@ -1,11 +1,11 @@
 from __future__ import annotations
-from typing import Any
+from typing import Any, Callable
 
 import logging
 import asyncio
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 
 from .domain.clu import GrentonClu
@@ -35,10 +35,15 @@ class GrentonCoordinator(DataUpdateCoordinator):
         
         # Map CLU IDs to their API instances
         self._apis: dict[str, GrentonCluApi] = {}
-        
+
         # Initialize API instances for each CLU
         for clu in clus:
             self._apis[clu.id] = GrentonCluApi(clu, encryption)
+
+        # Listeners for gesture entities. Each entry pairs the entity's state
+        # object with a synchronous callback receiving (value, origin), where
+        # origin is "push" (clientReport) or "resync" (register response).
+        self._gesture_listeners: list[tuple[GrentonStateObject, Callable[[GrentonValue, str], None]]] = []
 
     async def _async_update_data(self): # type: ignore
         return self.state
@@ -96,6 +101,8 @@ class GrentonCoordinator(DataUpdateCoordinator):
                     elif isinstance(key, GrentonCluStateAttributeKey): # type: ignore
                         clu_state.set_attribute(key, value)
                 self.async_set_updated_data(self.state.__dict__)
+                # Values arrived in a register response -> resync origin.
+                self._notify_gesture_listeners(clu_id, "resync")
         except Exception as e:
             _LOGGER.error("[%s] Error during registration: %s", clu_id, e)
     
@@ -148,12 +155,51 @@ class GrentonCoordinator(DataUpdateCoordinator):
         """
         clu_state = self.state.clus[clu_id]
         clu_state.update_state(values)
-        
+
         self.async_set_updated_data(self.state.__dict__)
+        # Values arrived in a clientReport -> push origin. Notified only after
+        # the new values are stored above.
+        self._notify_gesture_listeners(clu_id, "push")
         _LOGGER.debug("[%s] Processed report with %d values", clu_id, len(values))
-    
+
     def register_component_state(self, state: GrentonStateObject) -> None:
         self.state.register_state(state)
+
+    @callback
+    def async_add_gesture_listener(
+        self,
+        state: GrentonStateObject,
+        callback_fn: Callable[[GrentonValue, str], None],
+    ) -> Callable[[], None]:
+        """Register a gesture listener and return a function to remove it.
+
+        The callback is invoked on the event loop with (value, origin) whenever
+        this state's CLU stores new values, where value is the current value of
+        this state's key only.
+        """
+        entry = (state, callback_fn)
+        self._gesture_listeners.append(entry)
+
+        @callback
+        def remove_listener() -> None:
+            try:
+                self._gesture_listeners.remove(entry)
+            except ValueError:
+                pass
+
+        return remove_listener
+
+    @callback
+    def _notify_gesture_listeners(self, clu_id: str, origin: str) -> None:
+        """Notify gesture listeners for a CLU with their key's current value."""
+        for state, callback_fn in list(self._gesture_listeners):
+            if state.clu_id != clu_id:
+                continue
+            value = self.state.get_value_for_component(state)
+            try:
+                callback_fn(value, origin)
+            except Exception as e:  # pragma: no cover - defensive
+                _LOGGER.error("[%s] Error in gesture listener: %s", clu_id, e)
     
     async def async_setup(self) -> None:
         # Connect all APIs

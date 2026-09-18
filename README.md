@@ -42,6 +42,7 @@ Your support helps maintain features, fix bugs, and improve documentation.
 | **ROLLER_SHUTTER_V3** | Roller shutter V3 exposed as a single `cover` entity (position; lamel/tilt when available). |
 | **CAMERA** | Camera stream exposed as `camera`. |
 | **THERMOSTAT_V2** | Thermostat exposed as `climate` with current/target temperature, heating state, and preset modes (manual, away, schedule). |
+| **EVENT** | A `VALUE_V2` widget placed on the **HA Events** page exposed as an `event` entity for wall-button gestures (see [Button gestures](#-button-gestures-event-entities)). |
 
 ## 🚀 Installation
 
@@ -99,6 +100,29 @@ After initial setup, you can customize individual entities:
    - **Binary Sensors**: Select appropriate device class
 
 The integration intelligently filters available options based on your selections and automatically skips unnecessary configuration steps.
+
+## 👆 Button gestures (event entities)
+
+Physical wall buttons wired to Grenton DIN inputs can be exposed as Home Assistant `event` entities so you can trigger automations on clicks and holds. Gestures are detected inside the CLU and written to a numeric User Feature per **gesture channel** — a channel represents a *function*, not a specific button, and carries no information about which button produced the gesture.
+
+**Page name rule.** Any `VALUE_V2` widget you place on a myGrenton dashboard page named **`HA Events`** (the `EVENT_PAGE_NAME` constant, matched case-insensitively after trimming) becomes an `event` entity instead of a `sensor`. `VALUE_V2` widgets on every other page, and all other widget types on the `HA Events` page, keep working exactly as before.
+
+**Value encoding.** The CLU writes `value = seq * 10 + code`:
+
+| Field | Meaning |
+|-------|---------|
+| `seq` | `0..9999`, incremented (mod 10000) for every emitted gesture |
+| `code = 0` | idle — the CLU clears the code ~2 s after a gesture (`seq` unchanged) |
+| `code = 1` | single click |
+| `code = 2` | double click |
+| `code = 3` | hold start |
+| `code = 4` | hold release |
+
+Codes 5–9, negative numbers, non-integral numbers and values above 99999 are invalid. Values may arrive as integral floats (`51.0`) or numeric strings; they are normalised to int.
+
+**Firing rules.** The first value ever seen is only a baseline and never fires; a value that arrives in the periodic 45 s register resync only updates the baseline and never fires (so a lost push packet can never deliver a stale gesture long after the press); a value pushed in a live `clientReport` fires exactly once when it differs from this channel's last seen value and its code is 1–4, while code 0 updates the baseline silently — an unchanged value repeated in a report triggered by another key is ignored, if the sequence jumped by more than one the missed gestures are logged as a warning but the current gesture still fires, and invalid values are logged once per distinct value and treated as baseline without firing. Each fired event carries a single `sequence` attribute.
+
+> **Note:** After adding or renaming the `HA Events` page in Object Manager, run **Configure → Rediscover devices** for the integration to pick up the new event entities.
 
 ## 🎨 Device Classes & Units
 
