@@ -39,10 +39,15 @@ class DeviceMapper:
     """Router that dispatches widget DTOs to appropriate device mappers."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetUnionDto, coordinator: GrentonCoordinator) -> BaseGrentonDevice:
-        """Convert widget DTO to domain device using appropriate mapper."""
+    def to_domain(dto: GrentonWidgetUnionDto, coordinator: GrentonCoordinator, page_name: str | None = None) -> BaseGrentonDevice:
+        """Convert widget DTO to domain device using appropriate mapper.
+
+        ``page_name`` carries the dashboard page context so VALUE_V2 widgets on
+        the events page become event entities. Other widget mappers keep their
+        existing ``(dto, coordinator)`` signature.
+        """
         if isinstance(dto, GrentonWidgetValueV2Dto):
-            return DeviceValueV2Mapper.to_domain(dto, coordinator)
+            return DeviceValueV2Mapper.to_domain(dto, coordinator, page_name)
         if isinstance(dto, GrentonWidgetValueDoubleDto):
             return DeviceValueDoubleMapper.to_domain(dto, coordinator)
         if isinstance(dto, GrentonWidgetOnOffDto):
@@ -75,6 +80,9 @@ class DeviceMapper:
     @staticmethod
     def from_mobile_interface(dto: GrentonMobileInterfaceDto, coordinator: GrentonCoordinator) -> list[BaseGrentonDevice]:
         """Convert mobile interface DTO to list of devices."""
-        widgets = [widget for page in dto.pages for widget in page.widgets]
-        devices = [DeviceMapper.to_domain(widget, coordinator) for widget in widgets]
+        devices = [
+            DeviceMapper.to_domain(widget, coordinator, page.name)
+            for page in dto.pages
+            for widget in page.widgets
+        ]
         return devices

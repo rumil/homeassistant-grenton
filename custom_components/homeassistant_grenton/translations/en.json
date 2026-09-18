@@ -158,6 +158,20 @@
           "unknown": "unknown"
         }
       }
+    },
+    "event": {
+      "gesture": {
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "single": "Single click",
+              "double": "Double click",
+              "hold_start": "Hold start",
+              "hold_release": "Hold release"
+            }
+          }
+        }
+      }
     }
   },
 
