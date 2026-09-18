@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from ..entities.base import BaseGrentonEntity
+from ..utils.naming import normalize_label
 
 
 @dataclass
@@ -26,8 +27,9 @@ class BaseGrentonDevice(ABC):
             manufacturer="Grenton",
             model=self.type,
         )
-        if self.name is not None:
-            info["name"] = self.name
+        name = normalize_label(self.name)
+        if name is not None:
+            info["name"] = name
         else:
             info["translation_key"] = self.type.lower()
         return info

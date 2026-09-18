@@ -29,6 +29,9 @@ class GrentonEntityGestureEvent(BaseGrentonEntity, EventEntity):
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize gesture event entity."""
+        # Primary entity of its device (name=None), so it inherits the device's
+        # label as its name. The translation_key carries only the event_type
+        # state translations (entity.event.gesture has no "name" key).
         BaseGrentonEntity.__init__(self, coordinator, id, None, "gesture", device_info)
         EventEntity.__init__(self)
 

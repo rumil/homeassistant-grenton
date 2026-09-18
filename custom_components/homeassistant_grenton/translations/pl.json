@@ -187,7 +187,6 @@
     },
     "event": {
       "gesture": {
-        "name": "Gest",
         "state_attributes": {
           "event_type": {
             "state": {

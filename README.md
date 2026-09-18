@@ -124,6 +124,8 @@ Codes 5–9, negative numbers, non-integral numbers and values above 99999 are i
 
 > **Note:** After adding or renaming the `HA Events` page in Object Manager, run **Configure → Rediscover devices** for the integration to pick up the new event entities.
 
+> **Note:** A gesture entity's `entity_id` is fixed when it is first registered and does not change if you later rename the widget (only the friendly name updates). Choose the final widget label before the first **Rediscover devices** so your automations reference a stable `entity_id`.
+
 ## 🎨 Device Classes & Units
 
 ### Sensor Device Classes

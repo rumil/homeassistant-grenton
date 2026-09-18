@@ -3,6 +3,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.core import callback
 
 from ...coordinator import GrentonCoordinator
+from ..utils.naming import normalize_label
 
 
 class BaseGrentonEntity(CoordinatorEntity[GrentonCoordinator]):
@@ -28,7 +29,7 @@ class BaseGrentonEntity(CoordinatorEntity[GrentonCoordinator]):
     ) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = id
-        self._attr_name = name
+        self._attr_name = normalize_label(name)
         if translation_key is not None:
             self._attr_translation_key = translation_key
         self._attr_device_info = device_info
