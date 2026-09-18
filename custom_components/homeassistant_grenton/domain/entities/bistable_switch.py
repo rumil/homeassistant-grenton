@@ -17,16 +17,17 @@ class GrentonEntityBistableSwitch(BaseGrentonEntity, SwitchEntity): # pyright: i
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         unit: GrentonUnit,
         state_object: GrentonStateObject,
         action_on: GrentonAction,
         action_off: GrentonAction,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize bistable switch entity."""
         SwitchEntity.__init__(self)
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         self.unit = unit
         self.state_object = state_object
         self.action_on = action_on

@@ -12,18 +12,18 @@ class DeviceThermostatV2Mapper:
     """Mapper for GrentonWidgetThermostatV2Dto to GrentonDeviceThermostatV2."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetThermostatV2Dto, coordinator: GrentonCoordinator) -> GrentonDeviceThermostatV2:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetThermostatV2Dto, coordinator: GrentonCoordinator) -> list[GrentonDeviceThermostatV2]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceThermostatV2(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.label,
         )
 
         entity = GrentonEntityClimate(
             coordinator=coordinator,
             id=f"{dto.id}_0",
-            label=dto.label,
             state_current_temperature=GrentonStateObject.from_dto(dto.object.currentTemperature),
             state_target_temperature=GrentonStateObject.from_dto(dto.object.targetTemperature),
             state_min_temperature=GrentonStateObject.from_dto(dto.object.minTemperature),
@@ -38,4 +38,4 @@ class DeviceThermostatV2Mapper:
         )
 
         device.entities = [entity]
-        return device
+        return [device]

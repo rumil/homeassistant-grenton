@@ -6,7 +6,15 @@ from ...coordinator import GrentonCoordinator
 
 
 class BaseGrentonEntity(CoordinatorEntity[GrentonCoordinator]):
-    """Base entity class that inherits CoordinatorEntity for automatic updates."""
+    """Base entity class that inherits CoordinatorEntity for automatic updates.
+
+    Naming follows HA's `has_entity_name` convention:
+      - `name=None` and no `translation_key` → entity is the device's primary
+        feature; HA uses the device name as the entity name.
+      - `name="..."` → user-defined name from the Grenton API; not translatable.
+      - `translation_key="..."` → fixed sub-feature; HA resolves the translation
+        from `entity.<platform>.<translation_key>.name` in the strings file.
+    """
 
     _attr_has_entity_name = True
 
@@ -14,25 +22,18 @@ class BaseGrentonEntity(CoordinatorEntity[GrentonCoordinator]):
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
-        """Initialize entity with coordinator and device info."""
         super().__init__(coordinator)
-        self.label = label
         self._attr_unique_id = id
+        self._attr_name = name
+        if translation_key is not None:
+            self._attr_translation_key = translation_key
         self._attr_device_info = device_info
-
-    @property
-    def name(self) -> str: # pyright: ignore[reportIncompatibleVariableOverride]
-        """Return the name of the sensor."""
-        return self.label
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator.
-        
-        This is called automatically by CoordinatorEntity when the coordinator
-        data is updated (either on schedule or when async_refresh is called).
-        """
+        """Handle updated data from the coordinator."""
         self.async_write_ha_state()

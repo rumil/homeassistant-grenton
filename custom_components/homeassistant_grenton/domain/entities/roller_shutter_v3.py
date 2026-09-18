@@ -16,18 +16,19 @@ class GrentonEntityRollerShutterV3(BaseGrentonEntity, CoverEntity): # pyright: i
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         cover_state: GrentonStateObject,
         cover_position: GrentonStateObject,
         set_position: GrentonAction,
         cover_tilt_position: GrentonStateObject | None = None,
         set_tilt_position: GrentonAction | None = None,
         stop: GrentonAction | None = None,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize roller shutter entity."""
         CoverEntity.__init__(self)
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
 
         self.cover_state = cover_state
         self.cover_position = cover_position

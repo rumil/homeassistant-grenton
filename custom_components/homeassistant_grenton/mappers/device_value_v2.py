@@ -24,16 +24,18 @@ class DeviceValueV2Mapper:
         dto: GrentonWidgetValueV2Dto,
         coordinator: GrentonCoordinator,
         page_name: str | None = None,
-    ) -> GrentonDeviceValueV2:
-        """Convert DTO to domain object.
+    ) -> list[GrentonDeviceValueV2]:
+        """Convert DTO to a single-element list of domain devices.
 
         On a page named after ``EVENT_PAGE_NAME`` the widget becomes a gesture
-        ``event`` entity; on any other page it stays a ``sensor`` as before.
+        ``event`` entity; on any other page it stays a ``sensor`` as before. The
+        device carries the widget label as its name either way.
         """
         device = GrentonDeviceValueV2(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.label,
         )
 
         state_object = GrentonStateObject.from_dto(dto.object.value)
@@ -42,7 +44,6 @@ class DeviceValueV2Mapper:
             entity = GrentonEntityGestureEvent(
                 coordinator=coordinator,
                 id=f"{dto.id}_gesture",
-                label=dto.label,
                 state_object=state_object,
                 device_info=device.device_info,
             )
@@ -50,10 +51,9 @@ class DeviceValueV2Mapper:
             entity = GrentonEntityValue(
                 coordinator=coordinator,
                 id=f"{dto.id}_0",
-                label=dto.label,
                 state_object=state_object,
                 device_info=device.device_info,
             )
 
         device.entities = [entity]
-        return device
+        return [device]

@@ -14,14 +14,15 @@ class GrentonEntityMultisensor( # pyright: ignore[reportIncompatibleVariableOver
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         device_class: SensorDeviceClass,
         unit_of_measurement: str,
         state_object: GrentonStateObject,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize multisensor sensor entity."""
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         SensorEntity.__init__(self)
 
         self._device_class = device_class

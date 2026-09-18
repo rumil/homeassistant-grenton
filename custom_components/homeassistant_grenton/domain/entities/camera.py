@@ -13,12 +13,13 @@ class GrentonEntityCamera( # pyright: ignore[reportIncompatibleVariableOverride]
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         stream: str,
+        name: str | None = None,
+        translation_key: str | None = None,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize camera entity."""
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, name, translation_key, device_info)
         Camera.__init__(self)
 
         self._stream = stream

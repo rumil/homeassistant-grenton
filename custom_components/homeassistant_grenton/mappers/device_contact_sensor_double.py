@@ -1,4 +1,4 @@
-"""Mapper for converting Contact Sensor Double widget DTO to domain device."""
+"""Mapper for converting ContactSensorDouble widget DTO to per-component devices."""
 
 from ..coordinator import GrentonCoordinator
 from ..domain.devices.contact_sensor_double import GrentonDeviceContactSensorDouble
@@ -8,65 +8,65 @@ from ..domain.entities.base import BaseGrentonEntity
 from ..domain.entities.binary_sensor import GrentonEntityBinarySensor
 from ..domain.entities.button import GrentonEntityButton
 from ..dto.widgets.contact_sensor_double import GrentonWidgetContactSensorDoubleDto
+from ..dto.components.contact_sensor_double import GrentonComponentContactSensorDoubleDto
 
 
 class DeviceContactSensorDoubleMapper:
-    """Mapper for GrentonWidgetContactSensorDoubleDto to GrentonDeviceContactSensorDouble."""
+    """Map a GrentonWidgetContactSensorDoubleDto to one HA device per side.
+
+    Each side carries its own user-given label. The binary_sensor is the
+    device's primary feature; an optional button sub-entity uses the
+    `button` translation_key.
+    """
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetContactSensorDoubleDto, coordinator: GrentonCoordinator) -> GrentonDeviceContactSensorDouble:
-        """Convert DTO to domain object."""
+    def to_domain(
+        dto: GrentonWidgetContactSensorDoubleDto, coordinator: GrentonCoordinator
+    ) -> list[GrentonDeviceContactSensorDouble]:
+        return [
+            DeviceContactSensorDoubleMapper._build_side(
+                dto_id=dto.id, dto_type=dto.type, side="left", component=dto.componentLeft, coordinator=coordinator
+            ),
+            DeviceContactSensorDoubleMapper._build_side(
+                dto_id=dto.id, dto_type=dto.type, side="right", component=dto.componentRight, coordinator=coordinator
+            ),
+        ]
+
+    @staticmethod
+    def _build_side(
+        dto_id: str,
+        dto_type: str,
+        side: str,
+        component: GrentonComponentContactSensorDoubleDto,
+        coordinator: GrentonCoordinator,
+    ) -> GrentonDeviceContactSensorDouble:
         device = GrentonDeviceContactSensorDouble(
-            type=dto.type,
-            id=dto.id,
+            type=dto_type,
+            id=f"{dto_id}_{side}",
             entities=[],
-        )
-        
-        entities: list[BaseGrentonEntity] = []
-
-        binary_sensor_left = GrentonEntityBinarySensor(
-            coordinator=coordinator,
-            id=f"{dto.id}_binary_sensor_left",
-            label=dto.componentLeft.label,
-            reversed=dto.componentLeft.reverseState,
-            state_object=GrentonStateObject.from_dto(dto.componentLeft.object.value),
-            device_info=device.device_info,
+            name=component.label,
         )
 
-        entities.append(binary_sensor_left)
-
-        binary_sensor_right = GrentonEntityBinarySensor(
-            coordinator=coordinator,
-            id=f"{dto.id}_binary_sensor_right",
-            label=dto.componentRight.label,
-            reversed=dto.componentRight.reverseState,
-            state_object=GrentonStateObject.from_dto(dto.componentRight.object.value),
-            device_info=device.device_info,
-        )
-
-        entities.append(binary_sensor_right)
-
-        if dto.componentLeft.object.clickAction is not None:
-            button = GrentonEntityButton(
+        entities: list[BaseGrentonEntity] = [
+            GrentonEntityBinarySensor(
                 coordinator=coordinator,
-                id=f"{dto.id}_button_left",
-                label=dto.componentLeft.label,
-                action_click=GrentonAction.from_dto(dto.componentLeft.object.clickAction),
+                id=f"{dto_id}_binary_sensor_{side}",
+                reversed=component.reverseState,
+                state_object=GrentonStateObject.from_dto(component.object.value),
                 device_info=device.device_info,
             )
+        ]
 
-            entities.append(button)
-
-        if dto.componentRight.object.clickAction is not None:
-            button = GrentonEntityButton(
-                coordinator=coordinator,
-                id=f"{dto.id}_button_right",
-                label=dto.componentRight.label,
-                action_click=GrentonAction.from_dto(dto.componentRight.object.clickAction),
-                device_info=device.device_info,
+        if component.object.clickAction is not None:
+            entities.append(
+                GrentonEntityButton(
+                    coordinator=coordinator,
+                    id=f"{dto_id}_button_{side}",
+                    translation_key="button",
+                    action_click=GrentonAction.from_dto(component.object.clickAction),
+                    device_info=device.device_info,
+                )
             )
-
-            entities.append(button)
 
         device.entities = entities
         return device

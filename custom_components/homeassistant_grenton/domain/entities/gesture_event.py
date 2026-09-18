@@ -13,28 +13,27 @@ class GrentonEntityGestureEvent(BaseGrentonEntity, EventEntity):
 
     The channel is a numeric User Feature shown as a VALUE_V2 widget. Its value
     encodes discrete gestures (single/double/hold_start/hold_release), decoded by
-    the pure ``GestureDecoder``. The entity's state changes only through the
-    dedicated gesture listener, never on ordinary coordinator updates.
+    the pure ``GestureDecoder``. The device carries the widget label as its name;
+    this entity is a translated "Gesture" sub-feature. Its state changes only
+    through the dedicated gesture listener, never on ordinary coordinator updates.
     """
 
     _attr_device_class = EventDeviceClass.BUTTON
     _attr_event_types = ["single", "double", "hold_start", "hold_release"]
-    _attr_translation_key = "gesture"
 
     def __init__(
         self,
         coordinator: GrentonCoordinator,
         id: str,
-        label: str,
         state_object: GrentonStateObject,
         device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize gesture event entity."""
-        BaseGrentonEntity.__init__(self, coordinator, id, label, device_info)
+        BaseGrentonEntity.__init__(self, coordinator, id, None, "gesture", device_info)
         EventEntity.__init__(self)
 
         self.state_object = state_object
-        self._decoder = GestureDecoder(name=label)
+        self._decoder = GestureDecoder(name=id)
 
         # Register state with coordinator so the key is subscribed and included
         # in register/report cycles.

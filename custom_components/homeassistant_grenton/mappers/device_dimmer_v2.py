@@ -12,18 +12,18 @@ class DeviceDimmerV2Mapper:
     """Mapper for GrentonWidgetDimmerV2Dto to GrentonDeviceDimmerV2."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetDimmerV2Dto, coordinator: GrentonCoordinator) -> GrentonDeviceDimmerV2:
-        """Convert DTO to domain object."""
+    def to_domain(dto: GrentonWidgetDimmerV2Dto, coordinator: GrentonCoordinator) -> list[GrentonDeviceDimmerV2]:
+        """Convert DTO to a single-element list of domain devices."""
         device = GrentonDeviceDimmerV2(
             type=dto.type,
             id=dto.id,
             entities=[],
+            name=dto.label,
         )
-        
+
         entity = GrentonEntityDimmer(
             coordinator=coordinator,
             id=f"{dto.id}_0",
-            label=dto.label,
             min=dto.min,
             max=dto.max,
             precision=dto.precision,
@@ -35,4 +35,4 @@ class DeviceDimmerV2Mapper:
         )
 
         device.entities = [entity]
-        return device
+        return [device]

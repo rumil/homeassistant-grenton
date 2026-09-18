@@ -39,8 +39,12 @@ class DeviceMapper:
     """Router that dispatches widget DTOs to appropriate device mappers."""
 
     @staticmethod
-    def to_domain(dto: GrentonWidgetUnionDto, coordinator: GrentonCoordinator, page_name: str | None = None) -> BaseGrentonDevice:
-        """Convert widget DTO to domain device using appropriate mapper.
+    def to_domain(dto: GrentonWidgetUnionDto, coordinator: GrentonCoordinator, page_name: str | None = None) -> list[BaseGrentonDevice]:
+        """Convert widget DTO to one or more domain devices.
+
+        Most widgets map 1:1 to a single HA device. Double-type widgets
+        (ON_OFF_DOUBLE, VALUE_DOUBLE, CONTACT_SENSOR_DOUBLE) split into one
+        HA device per logical component so each carries its own user label.
 
         ``page_name`` carries the dashboard page context so VALUE_V2 widgets on
         the events page become event entities. Other widget mappers keep their
@@ -54,21 +58,21 @@ class DeviceMapper:
             return DeviceOnOffMapper.to_domain(dto, coordinator)
         if isinstance(dto, GrentonWidgetOnOffDoubleDto):
             return DeviceOnOffDoubleMapper.to_domain(dto, coordinator)
-        if isinstance(dto, GrentonWidgetDimmerV2Dto):  
+        if isinstance(dto, GrentonWidgetDimmerV2Dto):
             return DeviceDimmerV2Mapper.to_domain(dto, coordinator)
         if isinstance(dto, GrentonWidgetLedDto):
             return DeviceLedMapper.to_domain(dto, coordinator)
         if isinstance(dto, GrentonWidgetContactSensorDto):
             return DeviceContactSensorMapper.to_domain(dto, coordinator)
-        if isinstance(dto, GrentonWidgetContactSensorDoubleDto): 
+        if isinstance(dto, GrentonWidgetContactSensorDoubleDto):
             return DeviceContactSensorDoubleMapper.to_domain(dto, coordinator)
-        if isinstance(dto, GrentonWidgetSliderDto): 
+        if isinstance(dto, GrentonWidgetSliderDto):
             return DeviceSliderMapper.to_domain(dto, coordinator)
         if isinstance(dto, GrentonWidgetMultisensorDto):
             return DeviceMultisensorMapper.to_domain(dto, coordinator)
-        if isinstance(dto, GrentonWidgetRollerShutterDto): 
+        if isinstance(dto, GrentonWidgetRollerShutterDto):
             return DeviceRollerShutterMapper.to_domain(dto, coordinator)
-        if isinstance(dto, GrentonWidgetRollerShutterV3Dto): 
+        if isinstance(dto, GrentonWidgetRollerShutterV3Dto):
             return DeviceRollerShutterV3Mapper.to_domain(dto, coordinator)
         if isinstance(dto, GrentonWidgetCameraDto): # type: ignore
             return DeviceCameraMapper.to_domain(dto, coordinator)
@@ -79,10 +83,10 @@ class DeviceMapper:
 
     @staticmethod
     def from_mobile_interface(dto: GrentonMobileInterfaceDto, coordinator: GrentonCoordinator) -> list[BaseGrentonDevice]:
-        """Convert mobile interface DTO to list of devices."""
-        devices = [
-            DeviceMapper.to_domain(widget, coordinator, page.name)
+        """Convert mobile interface DTO to a flat list of devices."""
+        return [
+            device
             for page in dto.pages
             for widget in page.widgets
+            for device in DeviceMapper.to_domain(widget, coordinator, page.name)
         ]
-        return devices
