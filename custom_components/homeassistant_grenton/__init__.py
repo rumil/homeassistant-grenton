@@ -48,16 +48,21 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: GrentonConfigEntr
     # Store runtime data
     config_entry.runtime_data = RuntimeData(coordinator=coordinator, devices=devices)
 
-    # Reconcile the device registry against the freshly-mapped devices.
-    # Anything still linked to this config entry but no longer present in the
-    # current device set is a leftover (e.g. devices created before the
-    # _DOUBLE widget split, or components removed from the Grenton config).
-    _cleanup_stale_devices(hass, config_entry, devices)
-
     # Setup the coordinator
     await coordinator.async_setup()
 
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
+
+    # Reconcile the device registry against the freshly-mapped devices.
+    # Anything still linked to this config entry but no longer present in the
+    # current device set is a leftover (e.g. devices created before the
+    # _DOUBLE widget split, or components removed from the Grenton config).
+    #
+    # This must run after the platforms are set up: adding the entities moves
+    # their registry entries onto the new devices first. Removing a device
+    # deletes every entity still attached to it, and deleting an entity also
+    # deletes helpers wrapping it (e.g. "Change device type of a switch").
+    _cleanup_stale_devices(hass, config_entry, devices)
 
     return True
 
