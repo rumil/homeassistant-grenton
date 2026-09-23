@@ -10,6 +10,7 @@ from homeassistant.const import CONF_UNIT_OF_MEASUREMENT
 from homeassistant.helpers import selector
 
 from .base import BaseGrentonEntity
+from .filtered_reading import NoiseFilteredSensorMixin
 from .configurable import ConfigurableEntity, BaseGrentonEntityConfigurationSchema, StepResult, StepDefinition
 from ..state_object import GrentonStateObject
 from ...coordinator import GrentonCoordinator
@@ -94,6 +95,7 @@ class GrentonEntityValueConfigurationSchema(BaseGrentonEntityConfigurationSchema
         )
 
 class GrentonEntityValue( # pyright: ignore[reportIncompatibleVariableOverride]
+    NoiseFilteredSensorMixin,
     BaseGrentonEntity,
     ConfigurableEntity[GrentonEntityValueConfigurationSchema],
     SensorEntity): 
@@ -117,10 +119,6 @@ class GrentonEntityValue( # pyright: ignore[reportIncompatibleVariableOverride]
         
         # Register state with coordinator
         coordinator.register_component_state(state_object)
-
-    @property
-    def native_value(self): # pyright: ignore[reportIncompatibleVariableOverride]
-        return self.coordinator.get_value_for_component(self.state_object)
 
     @property
     def device_class(self) -> SensorDeviceClass | None:  # pyright: ignore[reportIncompatibleVariableOverride]

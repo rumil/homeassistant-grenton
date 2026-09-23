@@ -2,10 +2,13 @@ from typing import Any
 
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode, HVACAction
 from homeassistant.components.climate.const import PRESET_AWAY, PRESET_NONE
+from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.const import UnitOfTemperature
+from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .base import BaseGrentonEntity
+from .filtered_reading import FilteredReading, NOISE_FILTER_PARAMS, raw_numeric_value
 from ..action import GrentonAction
 from ..state_object import GrentonStateObject
 from ...coordinator import GrentonCoordinator
@@ -77,8 +80,32 @@ class GrentonEntityClimate(BaseGrentonEntity, ClimateEntity):  # pyright: ignore
         coordinator.register_component_state(state_control_out)
         coordinator.register_component_state(state_mode)
 
+        self._current_temperature_reading = FilteredReading(
+            lambda: raw_numeric_value(self.coordinator, self._state_current_temperature),
+            self.async_write_ha_state,
+        )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self._current_temperature_reading.cancel)
+        self._refresh_current_temperature()
+
+    @callback
+    def _refresh_current_temperature(self) -> None:
+        self._current_temperature_reading.refresh(
+            self.hass, NOISE_FILTER_PARAMS[SensorDeviceClass.TEMPERATURE]
+        )
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._refresh_current_temperature()
+        super()._handle_coordinator_update()
+
     def _get_float(self, state_object: GrentonStateObject) -> float | None:
-        value = self.coordinator.get_value_for_component(state_object)
+        return self._to_float(self.coordinator.get_value_for_component(state_object))
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
         if value is None:
             return None
         try:
@@ -88,7 +115,7 @@ class GrentonEntityClimate(BaseGrentonEntity, ClimateEntity):  # pyright: ignore
 
     @property
     def current_temperature(self) -> float | None:
-        return self._get_float(self._state_current_temperature)
+        return self._to_float(self._current_temperature_reading.value)
 
     @property
     def target_temperature(self) -> float | None:

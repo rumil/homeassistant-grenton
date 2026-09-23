@@ -2,10 +2,12 @@ from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .base import BaseGrentonEntity
+from .filtered_reading import NoiseFilteredSensorMixin
 from ..state_object import GrentonStateObject
 from ...coordinator import GrentonCoordinator
 
 class GrentonEntityMultisensor( # pyright: ignore[reportIncompatibleVariableOverride]
+    NoiseFilteredSensorMixin,
     BaseGrentonEntity,
     SensorEntity): 
     """Multisensor sensor entity."""
@@ -31,10 +33,6 @@ class GrentonEntityMultisensor( # pyright: ignore[reportIncompatibleVariableOver
         
         # Register state with coordinator
         coordinator.register_component_state(state_object)
-
-    @property
-    def native_value(self): # pyright: ignore[reportIncompatibleVariableOverride]
-        return self.coordinator.get_value_for_component(self.state_object)
 
     @property
     def device_class(self) -> SensorDeviceClass | None:  # pyright: ignore[reportIncompatibleVariableOverride]

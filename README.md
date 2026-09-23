@@ -138,6 +138,10 @@ The integration supports all Home Assistant sensor device classes:
 - **Physical**: Distance, Speed, Weight, Volume, Pressure
 - **And many more...**
 
+Sensors whose device class supports it get `state_class: measurement`, so Home Assistant keeps long-term statistics for them.
+
+**Temperature noise filtering.** Grenton temperature readings often flicker by one step around a rounding boundary (e.g. 22.9 ↔ 23.0 °C several times a minute). For temperature sensors and the thermostat's current temperature, a change of 0.2 °C or more is shown immediately. A smaller change is shown only after it has held for 60 seconds.
+
 ### Number (Slider) Device Classes
 
 Configure sliders with appropriate device classes for proper representation:
