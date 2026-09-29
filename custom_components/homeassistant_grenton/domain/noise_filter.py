@@ -9,6 +9,10 @@ filter publishes a raw reading only when it is clearly a real change:
 - a smaller change is published only after the new value has held steady for
   ``settle_seconds`` (one-step flicker that reverts sooner is dropped).
 
+Numeric readings listed in ``invalid_values`` are dropped: the published value
+is kept as it was. Grenton temperature sensors report -255 while the CLU is
+being configured and for a moment after power returns.
+
 Non-numeric readings (None, strings, booleans) bypass the filter unchanged.
 Time is passed in by the caller, so the logic is deterministic and testable;
 scheduling the settle deadline is the caller's job (see ``pending_deadline``).
@@ -28,6 +32,7 @@ class NoiseFilterParams:
 
     deadband: float
     settle_seconds: float
+    invalid_values: frozenset[float] = frozenset()
 
 
 def _as_number(value: Any) -> float | None:
@@ -57,6 +62,10 @@ class NoiseFilter:
     def offer(self, raw: Any, now: float) -> bool:
         """Feed the current raw reading; return True if ``published`` changed."""
         number = _as_number(raw)
+        if number is not None and self._is_invalid(number):
+            # Keep the published value; a bogus reading also breaks any settle.
+            self._clear_candidate()
+            return False
         current = _as_number(self.published)
         if number is None or current is None:
             return self._publish(raw)
@@ -77,6 +86,9 @@ class NoiseFilter:
         if deadline is not None and now >= deadline - _EPSILON:
             return self._publish(raw)
         return False
+
+    def _is_invalid(self, number: float) -> bool:
+        return any(abs(number - invalid) < _EPSILON for invalid in self.params.invalid_values)
 
     def _publish(self, raw: Any) -> bool:
         self._clear_candidate()

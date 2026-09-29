@@ -12,8 +12,12 @@ from ..state_object import GrentonStateObject
 # Noise filtering per sensor device class. Temperatures are reported with 0.1
 # resolution and flicker by one step around rounding boundaries; a 0.2 deadband
 # passes real changes immediately while one-step flicker must hold for a minute.
+# -255 is what Grenton temperature sensors report while the CLU is being
+# configured and right after power returns; it is dropped, not published.
 NOISE_FILTER_PARAMS: dict[SensorDeviceClass, NoiseFilterParams] = {
-    SensorDeviceClass.TEMPERATURE: NoiseFilterParams(deadband=0.2, settle_seconds=60),
+    SensorDeviceClass.TEMPERATURE: NoiseFilterParams(
+        deadband=0.2, settle_seconds=60, invalid_values=frozenset({-255.0})
+    ),
 }
 
 

@@ -110,3 +110,47 @@ def test_int_and_float_equal_values_do_not_count_as_change():
     f = make(23)
     assert f.offer(23.0, 1.0) is False
     assert f.pending_deadline is None
+
+
+SENTINEL_PARAMS = NoiseFilterParams(
+    deadband=0.2, settle_seconds=60, invalid_values=frozenset({-255.0})
+)
+
+
+def test_invalid_value_keeps_published_value():
+    f = NoiseFilter(SENTINEL_PARAMS)
+    assert f.offer(22.5, 0.0) is True
+    # CLU configuration upload / power-on: the sensor briefly reports -255.
+    assert f.offer(-255, 1.0) is False
+    assert f.offer(-255.0, 2.0) is False
+    assert f.published == 22.5
+    assert f.offer(22.6, 3.0) is False  # small change still has to settle
+    assert f.offer(22.9, 4.0) is True
+    assert f.published == 22.9
+
+
+def test_invalid_value_before_first_reading_stays_unknown():
+    f = NoiseFilter(SENTINEL_PARAMS)
+    assert f.offer(-255, 0.0) is False
+    assert f.published is None
+    assert f.pending_deadline is None
+    assert f.offer(21.0, 1.0) is True
+    assert f.published == 21.0
+
+
+def test_invalid_value_cancels_pending_settle():
+    f = NoiseFilter(SENTINEL_PARAMS)
+    f.offer(23.0, 0.0)
+    assert f.offer(23.1, 10.0) is False
+    assert f.pending_deadline == 70.0
+    assert f.offer(-255, 20.0) is False
+    # No stale deadline left behind (the caller would re-arm a timer forever).
+    assert f.pending_deadline is None
+    assert f.offer(23.1, 30.0) is False
+    assert f.pending_deadline == 90.0
+
+
+def test_invalid_values_only_apply_when_configured():
+    f = make(23.0)
+    assert f.offer(-255, 1.0) is True
+    assert f.published == -255
