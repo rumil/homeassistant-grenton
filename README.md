@@ -142,7 +142,7 @@ Sensors whose device class supports it get `state_class: measurement`, so Home A
 
 **Temperature noise filtering.** Grenton temperature readings often flicker by one step around a rounding boundary (e.g. 22.9 ↔ 23.0 °C several times a minute). For temperature sensors and the thermostat's current temperature, a change of 0.2 °C or more is shown immediately. A smaller change is shown only after it has held for 60 seconds.
 
-The value -255 that Grenton temperature sensors report while a configuration is being uploaded to the CLU, and for a moment after power returns, is ignored: the last valid temperature stays in place (or the sensor stays unknown if there was none yet).
+The value -255 that Grenton temperature sensors report while a configuration is being uploaded to the CLU, and for a moment after power returns, is not shown. The last valid temperature stays in place for up to 5 minutes; if the sensor still reports -255 after that, its state becomes `unknown` until a valid reading arrives.
 
 ### Number (Slider) Device Classes
 

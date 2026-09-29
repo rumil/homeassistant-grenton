@@ -112,8 +112,12 @@ def test_int_and_float_equal_values_do_not_count_as_change():
     assert f.pending_deadline is None
 
 
+
 SENTINEL_PARAMS = NoiseFilterParams(
-    deadband=0.2, settle_seconds=60, invalid_values=frozenset({-255.0})
+    deadband=0.2,
+    settle_seconds=60,
+    invalid_values=frozenset({-255.0}),
+    invalid_hold_seconds=300,
 )
 
 
@@ -129,12 +133,43 @@ def test_invalid_value_keeps_published_value():
     assert f.published == 22.9
 
 
+def test_invalid_value_held_until_hold_time_then_unknown():
+    f = NoiseFilter(SENTINEL_PARAMS)
+    f.offer(22.5, 0.0)
+    assert f.offer(-255, 10.0) is False
+    assert f.pending_deadline == 310.0
+    # Repeated reports do not restart the hold clock.
+    assert f.offer(-255, 200.0) is False
+    assert f.pending_deadline == 310.0
+    assert f.offer(-255, 309.0) is False
+    assert f.published == 22.5
+    assert f.offer(-255, 310.0) is True
+    assert f.published is None
+    # Nothing left to schedule once unknown is published.
+    assert f.pending_deadline is None
+    assert f.offer(-255, 400.0) is False
+    # First valid reading recovers immediately.
+    assert f.offer(22.6, 401.0) is True
+    assert f.published == 22.6
+
+
+def test_valid_reading_resets_hold_clock():
+    f = NoiseFilter(SENTINEL_PARAMS)
+    f.offer(22.5, 0.0)
+    f.offer(-255, 10.0)
+    assert f.offer(22.5, 100.0) is False
+    assert f.pending_deadline is None
+    assert f.offer(-255, 200.0) is False
+    assert f.pending_deadline == 500.0
+
+
 def test_invalid_value_before_first_reading_stays_unknown():
     f = NoiseFilter(SENTINEL_PARAMS)
     assert f.offer(-255, 0.0) is False
     assert f.published is None
     assert f.pending_deadline is None
-    assert f.offer(21.0, 1.0) is True
+    assert f.offer(-255, 1000.0) is False
+    assert f.offer(21.0, 1001.0) is True
     assert f.published == 21.0
 
 
@@ -144,10 +179,17 @@ def test_invalid_value_cancels_pending_settle():
     assert f.offer(23.1, 10.0) is False
     assert f.pending_deadline == 70.0
     assert f.offer(-255, 20.0) is False
-    # No stale deadline left behind (the caller would re-arm a timer forever).
-    assert f.pending_deadline is None
+    # The settle deadline is replaced by the hold deadline.
+    assert f.pending_deadline == 320.0
     assert f.offer(23.1, 30.0) is False
     assert f.pending_deadline == 90.0
+
+
+def test_zero_hold_publishes_unknown_immediately():
+    f = NoiseFilter(NoiseFilterParams(0.2, 60, frozenset({-255.0})))
+    f.offer(23.0, 0.0)
+    assert f.offer(-255, 1.0) is True
+    assert f.published is None
 
 
 def test_invalid_values_only_apply_when_configured():
