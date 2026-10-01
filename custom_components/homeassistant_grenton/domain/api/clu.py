@@ -20,6 +20,26 @@ from .clu_messages import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Maximum number of requests in flight per CLU at the same time. The CLU drops
+# requests when it receives a burst of parallel datagrams, so by default
+# requests are sent one at a time. Pings, registrations and actions all share
+# this limit.
+MAX_IN_FLIGHT_REQUESTS = 1
+
+# Seconds to wait for a response. Counted from the moment the datagram is
+# sent, not from the moment the request was queued.
+RESPONSE_TIMEOUT = 5.0
+
+# Extra attempts for an idempotent action whose response timed out
+# (2 retries = 3 attempts in total). Non-idempotent actions are never retried.
+ACTION_RETRIES = 2
+
+# Seconds a request slot stays blocked after a request completes before the
+# next queued request may be sent. 0 disables the gap. If the CLU still drops
+# requests with MAX_IN_FLIGHT_REQUESTS = 1, try 0.02 instead of raising
+# RESPONSE_TIMEOUT.
+REQUEST_GAP = 0.0
+
 class GrentonCluApi:
     """Handles all communication with Grenton CLUs via UDP."""
     
@@ -106,10 +126,31 @@ class GrentonCluApi:
             _LOGGER.warning("[%s] No protocol available for action execution", self.clu.id)
             return False
         
+        # Build the payload before the first await: entities reuse and mutate
+        # their action objects, so the value must be captured now.
         request = GrentonCluApiActionRequest.from_action(action)
-        wire_message = await self.protocol.send_request(request)
+        attempts = 1 + ACTION_RETRIES if request.idempotent else 1
         
-        return wire_message is not None
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                request = request.with_new_msg_id()
+            
+            is_last_attempt = attempt == attempts
+            _LOGGER.debug("[%s][%s] Action attempt %d/%d: %s",
+                          self.clu.name, request.msg_id, attempt, attempts, request.payload)
+            
+            wire_message = await self.protocol.send_request(
+                request,
+                timeout_log_level=logging.WARNING if is_last_attempt else logging.DEBUG,
+            )
+            
+            if wire_message is not None:
+                if attempt > 1:
+                    _LOGGER.info("[%s][%s] Action succeeded on attempt %d/%d: %s",
+                                 self.clu.name, request.msg_id, attempt, attempts, request.payload)
+                return True
+        
+        return False
 
 
 class GrentonCluApiProtocol(asyncio.DatagramProtocol):
@@ -119,7 +160,12 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         self.api = api
         self._pending: Dict[str, asyncio.Future[str]] = {}
         self._pending_lock = asyncio.Lock()
-        self._response_timeout = 5.0
+        self._response_timeout = RESPONSE_TIMEOUT
+        self._request_gap = REQUEST_GAP
+        self._max_in_flight = MAX_IN_FLIGHT_REQUESTS
+        self._slots = asyncio.Semaphore(MAX_IN_FLIGHT_REQUESTS)
+        self._waiting = 0
+        self._in_flight = 0
         self.subscription_callback: Optional[Callable[[list[GrentonValue]], Awaitable[None]]] = None
     
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:
@@ -184,12 +230,23 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         
         asyncio.create_task(_complete())
     
-    async def send_request(self, request: Any, message_id: Optional[str] = None) -> Optional[str]:
+    async def send_request(
+        self,
+        request: Any,
+        message_id: Optional[str] = None,
+        *,
+        timeout_log_level: int = logging.WARNING,
+    ) -> Optional[str]:
         """Send a request to the CLU and wait for response.
+        
+        At most MAX_IN_FLIGHT_REQUESTS requests are in flight at once; other
+        requests wait in a queue. The response timeout starts when the
+        datagram is sent.
         
         Args:
             request: Request object implementing GrentonCluApiRequest protocol
             message_id: Deprecated - msg_id is now in the request itself
+            timeout_log_level: Log level for the "Request timeout" message
             
         Returns:
             Response wire format string or None if failed
@@ -206,6 +263,34 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             _LOGGER.error("[%s] Failed to encrypt request", self.api.clu.name)
             return None
         
+        self._waiting += 1
+        _LOGGER.debug("[%s][%s] Queued (waiting: %d, in flight: %d/%d)",
+                      self.api.clu.name, msg_id, self._waiting, self._in_flight, self._max_in_flight)
+        try:
+            await self._slots.acquire()
+        finally:
+            self._waiting -= 1
+        
+        self._in_flight += 1
+        try:
+            return await self._send_and_wait(request, msg_id, encrypted, timeout_log_level)
+        finally:
+            self._in_flight -= 1
+            self._release_slot()
+    
+    async def _send_and_wait(
+        self,
+        request: Any,
+        msg_id: str,
+        encrypted: bytes,
+        timeout_log_level: int,
+    ) -> Optional[str]:
+        """Send one datagram and wait for its response. Caller holds a slot."""
+        # The transport may have been closed while the request was queued.
+        if not self.api.transport:
+            _LOGGER.error("[%s] Transport not ready", self.api.clu.name)
+            return None
+        
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         
         async with self._pending_lock:
@@ -213,7 +298,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         
         try:
             self.api.transport.sendto(encrypted, (self.api.clu.ip, self.api.clu.port))
-            _LOGGER.debug("[%s][%s] Sent: %s", self.api.clu.name, msg_id, request.raw)
+            _LOGGER.debug("[%s][%s] Sent (waiting: %d, in flight: %d/%d): %s",
+                          self.api.clu.name, msg_id, self._waiting, self._in_flight,
+                          self._max_in_flight, request.raw)
         except Exception as e:
             async with self._pending_lock:
                 self._pending.pop(msg_id, None)
@@ -226,12 +313,19 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         except asyncio.TimeoutError:
             async with self._pending_lock:
                 self._pending.pop(msg_id, None)
-            _LOGGER.warning("[%s][%s] Request timeout", self.api.clu.name, msg_id)
+            _LOGGER.log(timeout_log_level, "[%s][%s] Request timeout", self.api.clu.name, msg_id)
             return None
         except Exception:
             async with self._pending_lock:
                 self._pending.pop(msg_id, None)
             raise
+    
+    def _release_slot(self) -> None:
+        """Free a request slot, after the configured gap if there is one."""
+        if self._request_gap > 0:
+            asyncio.get_running_loop().call_later(self._request_gap, self._slots.release)
+        else:
+            self._slots.release()
     
     def error_received(self, exc: Exception) -> None:
         _LOGGER.error("[%s] UDP error: %s", self.api.clu.name, exc)

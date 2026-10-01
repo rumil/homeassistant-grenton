@@ -139,10 +139,16 @@ class GrentonCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("[%s] No API found for CLU during action execution", action.clu_id)
             return
         
+        # State is never set optimistically here. Entity state only changes
+        # when the CLU reports a new value, so after a failed action the entity
+        # keeps showing the real (previous) state.
         try:
+            # Capture the payload now: entities mutate their action objects,
+            # and the request may wait in the CLU queue before it is sent.
+            payload = GrentonCluApiActionRequest.from_action(action).payload
             success = await api.execute_action(action)
             if not success:
-                _LOGGER.warning("[%s] Action execution failed for payload: %s", action.clu_id, GrentonCluApiActionRequest.from_action(action).payload)
+                _LOGGER.warning("[%s] Action execution failed for payload: %s", action.clu_id, payload)
         except Exception as e:
             _LOGGER.error("[%s] Error executing action: %s", action.clu_id, e)
     
