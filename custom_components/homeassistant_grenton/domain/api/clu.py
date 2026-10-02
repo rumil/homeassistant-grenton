@@ -90,7 +90,9 @@ class GrentonCluApi:
             return False
         
         request = GrentonCluApiPingRequest(self.keep_alive_id)
-        wire_message = await self.protocol.send_request(request)
+        # The coordinator counts failed pings and logs the outcome, so a ping
+        # timeout is not logged as a warning here.
+        wire_message = await self.protocol.send_request(request, timeout_log_level=logging.DEBUG)
         
         if wire_message is None:
             return False
@@ -167,6 +169,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         self._waiting = 0
         self._in_flight = 0
         self.subscription_callback: Optional[Callable[[list[GrentonValue]], Awaitable[None]]] = None
+        # Called for every valid message received from the CLU (responses,
+        # including late ones, and client reports): proof that it is alive.
+        self.contact_callback: Optional[Callable[[], None]] = None
     
     def connection_made(self, transport: asyncio.DatagramTransport) -> None:
         _LOGGER.debug("[%s] UDP connection established", self.api.clu.name)
@@ -207,6 +212,12 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         
         message_id = parts[2].lower()
         _LOGGER.debug("[%s][%s] Received: %s", self.api.clu.name, message_id, wire_message)
+        
+        if self.contact_callback:
+            try:
+                self.contact_callback()
+            except Exception as e:  # pragma: no cover - defensive
+                _LOGGER.error("[%s] Error in contact callback: %s", self.api.clu.name, e)
         
         async def _complete() -> None:
             async with self._pending_lock:

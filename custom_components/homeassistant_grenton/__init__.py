@@ -8,6 +8,7 @@ from homeassistant.helpers import device_registry as dr
 from .integration_config import GrentonConfigEntry, GrentonConfigEntryData, RuntimeData
 from .coordinator import GrentonCoordinator
 from .mappers.device_mapper import DeviceMapper
+from .mappers.device_clu import DeviceCluMapper
 
 from .dto.mobile_interface import GrentonMobileInterfaceDto
 from .domain.encryption import GrentonEncryption
@@ -36,6 +37,8 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: GrentonConfigEntr
     
     # Map mobile interface DTO to devices
     devices = DeviceMapper.from_mobile_interface(mobile_interface_dto, coordinator)
+    # One diagnostic device per CLU with its connectivity sensor
+    devices += DeviceCluMapper.to_domain(clus, coordinator)
 
     _LOGGER.debug("Mapped %d device(s) from mobile interface", len(devices))
     _LOGGER.debug("Device details:")
@@ -43,7 +46,10 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: GrentonConfigEntr
         _LOGGER.debug("- Device %s (%s) with %d entity(ies)", device.type, device.id, len(device.entities))
         _LOGGER.debug("  Entities:")
         for entity in device.entities:
-            _LOGGER.debug("  - Entity %s", entity.name)
+            # Not entity.name: HA caches it on first access, and before the
+            # entity is added to a platform it cannot resolve device-class
+            # names (e.g. "Connectivity") yet.
+            _LOGGER.debug("  - Entity %s", entity.unique_id)
     
     # Store runtime data
     config_entry.runtime_data = RuntimeData(coordinator=coordinator, devices=devices)

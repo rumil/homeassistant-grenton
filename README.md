@@ -21,6 +21,7 @@ Your support helps maintain features, fix bugs, and improve documentation.
 - **🏠 Multiple Widget Types** - Support for lights, switches, dimmers, sensors, covers, and more
 - **⚙️ Per-Entity Configuration** - Customize device class and unit of measurement for each supported entity through the UI
 - **🔄 Real-time Updates** - Automatic state synchronization with Grenton system
+- **📡 CLU Connectivity Monitoring** - A diagnostic `binary_sensor` per CLU (`binary_sensor.grenton_clu_connectivity` with a single CLU) goes off after 3 failed pings in a row. While a CLU is not responding its entities are unavailable and actions fail immediately; when it responds again its state is re-read from the CLU before the entities become available
 - **🌍 Multi-language Support** - Fully translated UI in English and Polish
 - **📱 Modern UI** - Native Home Assistant integration with clean configuration flows
 
