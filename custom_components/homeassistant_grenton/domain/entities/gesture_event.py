@@ -16,6 +16,8 @@ class GrentonEntityGestureEvent(BaseGrentonEntity, EventEntity):
     the pure ``GestureDecoder``. The device carries the widget label as its name;
     this entity is a translated "Gesture" sub-feature. Its state changes only
     through the dedicated gesture listener, never on ordinary coordinator updates.
+    Coordinator updates only write state when availability changed, e.g. when
+    the CLU disconnects or is resynced after a reconnect.
     """
 
     _attr_device_class = EventDeviceClass.BUTTON
@@ -37,6 +39,8 @@ class GrentonEntityGestureEvent(BaseGrentonEntity, EventEntity):
 
         self.state_object = state_object
         self._decoder = GestureDecoder(name=id)
+        # Availability last written to HA; None until added to HA.
+        self._written_available: bool | None = None
 
         # Register state with coordinator so the key is subscribed and included
         # in register/report cycles.
@@ -59,10 +63,24 @@ class GrentonEntityGestureEvent(BaseGrentonEntity, EventEntity):
         current = self.coordinator.get_value_for_component(self.state_object)
         self._decoder.decode(current, ORIGIN_RESYNC)
 
+        # The platform writes the initial state right after this returns,
+        # with the current availability.
+        self._written_available = self.available
+
     @callback
     def _handle_coordinator_update(self) -> None:
-        """No-op: gesture state changes only via the gesture listener."""
-        return
+        """Write state only when availability changed.
+
+        The CLU going unavailable or becoming available again after a resync
+        reaches entities only through coordinator updates. Without this the
+        entity would stay unavailable until the next gesture, and HA would not
+        treat that gesture as an event (transition from unavailable). Ordinary
+        data updates never change the event state.
+        """
+        if self.available == self._written_available:
+            return
+        self.async_write_ha_state()
+        self._written_available = self.available
 
     @callback
     def _handle_gesture(self, value, origin: str) -> None:
@@ -72,3 +90,4 @@ class GrentonEntityGestureEvent(BaseGrentonEntity, EventEntity):
             return
         self._trigger_event(gesture.event_type, {"sequence": gesture.sequence})
         self.async_write_ha_state()
+        self._written_available = self.available
