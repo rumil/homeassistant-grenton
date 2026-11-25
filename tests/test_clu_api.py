@@ -10,6 +10,7 @@ import base64
 import logging
 import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -389,3 +390,25 @@ def test_emergency_answer_to_a_ping_is_not_contact():
 
     assert asyncio.run(run()) is clu_api.PingResult.EMERGENCY
     assert contacts == []
+
+
+def test_answer_due_in_the_same_loop_pass_as_the_timeout_counts():
+    # The event loop pauses past the timeout (e.g. garbage collection) while
+    # the answer is on its way: answer and timeout are handled in one pass.
+    async def run():
+        api, transport = make_api(response_timeout=0.05)
+        loop = asyncio.get_running_loop()
+
+        def sendto(data, addr):
+            _, _, msg_id, _ = transport.cipher.decrypt(data).decode().split(":", 3)
+
+            def pause_then_answer():
+                time.sleep(0.1)
+                loop.call_soon(transport._respond, msg_id)
+
+            loop.call_soon(pause_then_answer)
+
+        transport.sendto = sendto
+        return await api.ping()
+
+    assert asyncio.run(run()) is clu_api.PingResult.OK

@@ -470,6 +470,11 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(msg_id, None)
+            if future.done() and not future.cancelled() and future.exception() is None:
+                # The answer and the timeout became due in the same event-loop
+                # pass (e.g. after a pause). The answer was already handled
+                # (a register answer applied), so it counts.
+                return future.result()
             _LOGGER.log(timeout_log_level, "[%s][%s] Request timeout", self.api.clu.name, msg_id)
             return None
         except BaseException:
