@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0
+
+- Changed: when a CLU restart is detected, `sensor.grenton_clu_last_boot` is
+  now written right after the CLU's entities become `unavailable` and before
+  any of them shows a value from after the restart. Before, it changed only
+  after the values were back, together with the event.
+- New: attribute `restart_detected_at` on `sensor.grenton_clu_last_boot`, and
+  `detected_at` in the `grenton_clu_restarted` event. When an entity goes from
+  `unavailable` to a value, `restart_detected_at >= from_state.last_changed`
+  means the CLU restarted in between (its values are its initial ones), and
+  anything else means an outage without a restart (its values can include
+  wall presses made meanwhile). See "Telling a restart from an outage" in the
+  README.
+- Changed: entities no longer come back from `unavailable` while it is not
+  known whether the CLU restarted. If its uptime cannot be read, they stay
+  unavailable, and available entities become unavailable when a second read
+  3 s later fails too, until it can be read. A CLU that does not report its
+  uptime gets restart detection turned off after 3 reads without a number
+  (before, too); a CLU that stops answering the uptime query after it
+  worked, after 10.
+- The `grenton_clu_restarted` event still fires after the values are back.
+
 ## 0.5.0
 
 Reliability of the connection to the CLU, compared against the vclu project
