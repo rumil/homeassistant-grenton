@@ -43,6 +43,18 @@ NOW = __import__("datetime").datetime(2026, 10, 2, 13, 41)
 # --- Pure state machine -------------------------------------------------------
 
 
+def test_mark_unsynced_makes_entities_unavailable_until_synced():
+    conn = CluConnectivity()
+    conn.record_contact(NOW)
+    conn.mark_synced()
+    assert conn.mark_unsynced()
+    assert conn.connected is True
+    assert not conn.available
+    assert not conn.mark_unsynced()
+    assert conn.mark_synced()
+    assert conn.available
+
+
 def test_three_failed_pings_disconnect():
     conn = CluConnectivity()
     conn.record_contact(NOW)
@@ -135,6 +147,8 @@ class FakeClu:
         self.protocol = protocol
         self.cipher = cipher
         self.hung = False
+        # Answers checkAlive() with "emergency" and nothing else.
+        self.emergency = False
         self.outputs = {"DOU0001": 1, "DOU0002": 0}
         self.sent: list[str] = []
         # session ID -> object names, in registration order
@@ -145,6 +159,10 @@ class FakeClu:
         _, _, msg_id, payload = plaintext.split(":", 3)
         self.sent.append(payload)
         if self.hung:
+            return
+        if self.emergency:
+            if payload == "checkAlive()":
+                asyncio.get_running_loop().call_soon(self._respond, msg_id, "emergency")
             return
         match = REGISTER_RE.match(payload)
         if match:
@@ -692,3 +710,60 @@ def test_failed_renewal_is_retried_after_a_short_delay(tmp_path, monkeypatch):
             await teardown(h)
 
     run(scenario())
+
+
+def test_emergency_mode_counts_as_not_responding(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            h.fake.emergency = True
+            for _ in range(3):
+                await h.ping()
+            assert h.sensor.is_on is False
+            assert not any(s.available for s in h.switches)
+
+            # Out of emergency mode: reconnect and refresh as after an outage.
+            h.fake.emergency = False
+            h.fake.outputs = {"DOU0001": 0, "DOU0002": 0}
+            await h.ping()
+            assert h.sensor.is_on is True
+            assert all(s.available for s in h.switches)
+            assert h.switches[0].is_on is False
+        finally:
+            await teardown(h)
+
+    with caplog.at_level(logging.INFO):
+        run(scenario())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("emergency mode: its project is not running" in m for m in messages) == 1
+    assert sum("no longer in emergency mode" in m for m in messages) == 1
+
+
+def test_renewal_failing_twice_makes_entities_unavailable(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(coordinator_module, "RENEW_RETRY_DELAY", 0.01)
+
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            drop_next_registers(h.fake, 2)
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is False
+            assert h.sensor.is_on is True  # still answering pings
+            assert not any(s.available for s in h.switches)
+
+            # The next contact registers again; entities come back.
+            h.fake.outputs = {"DOU0001": 0, "DOU0002": 1}
+            await h.ping()
+            await asyncio.sleep(0.05)
+            await h.settle()
+            assert all(s.available for s in h.switches)
+            assert h.switches[1].is_on is True
+        finally:
+            await teardown(h)
+
+    with caplog.at_level(logging.INFO):
+        run(scenario())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("did not accept 1 of its session(s) twice in a row" in m for m in messages) == 1
+    assert sum("accepted its sessions again" in m for m in messages) == 1

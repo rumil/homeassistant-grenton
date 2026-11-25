@@ -15,7 +15,7 @@ from .domain.clu import GrentonClu
 from .domain.encryption import GrentonEncryption
 from .domain.state_object import GrentonStateObject
 from .domain.action import GrentonAction
-from .domain.api.clu import ActionResult, GrentonCluApi
+from .domain.api.clu import ActionResult, GrentonCluApi, PingResult
 from .domain.connectivity import CluConnectivity, ConnectivityTransition
 from .domain.registration import RegistrationSession, plan_sessions
 from .state import GrentonState, GrentonCluState, GrentonCluStateVariableKey, GrentonCluStateAttributeKey, GrentonValue
@@ -65,6 +65,11 @@ class GrentonCoordinator(DataUpdateCoordinator):
         self._sync_locks: dict[str, asyncio.Lock] = {clu.id: asyncio.Lock() for clu in clus}
         # Last contact before the CLU went disconnected, for the reconnect log.
         self._offline_since: dict[str, datetime | None] = {}
+        # CLUs answering pings in emergency mode, so it is logged once.
+        self._emergency: set[str] = set()
+        # CLUs whose entities are unavailable because their sessions could
+        # not be renewed while they answered pings.
+        self._renewal_lost: set[str] = set()
         # Set once async_setup has done the initial sync. Before that, contact
         # does not start a resync because setup registers states itself.
         self._started = False
@@ -93,14 +98,22 @@ class GrentonCoordinator(DataUpdateCoordinator):
             return
         
         try:
-            success = await api.ping()
+            result = await api.ping()
         except Exception as e:
             _LOGGER.debug("[%s] Error during ping: %s", clu_id, e)
-            success = False
+            result = PingResult.NO_ANSWER
         
         # A successful ping is recorded as contact when its response arrives.
-        if not success:
-            self._handle_ping_failure(clu_id)
+        if result is PingResult.OK:
+            if clu_id in self._emergency:
+                self._emergency.discard(clu_id)
+                _LOGGER.info("[%s] CLU is no longer in emergency mode", clu_id)
+            return
+        if result is PingResult.EMERGENCY and clu_id not in self._emergency:
+            self._emergency.add(clu_id)
+            _LOGGER.warning("[%s] CLU answers in emergency mode: its project is not running, so it "
+                            "counts as not responding", clu_id)
+        self._handle_ping_failure(clu_id)
     
     @callback
     def _handle_ping_failure(self, clu_id: str) -> None:
@@ -182,8 +195,7 @@ class GrentonCoordinator(DataUpdateCoordinator):
                 await asyncio.sleep(RENEW_RETRY_DELAY)
                 failed = await self._register_sessions(clu_id, failed)
                 if failed:
-                    _LOGGER.warning("[%s] Renewal of %d session(s) failed twice; next attempt in %d s",
-                                    clu_id, len(failed), RENEW_INTERVAL)
+                    self._renewal_failed(clu_id, len(failed))
             if failed:
                 if reason != "renew":
                     _LOGGER.debug("[%s] State refresh failed, retrying on next contact", clu_id)
@@ -193,11 +205,34 @@ class GrentonCoordinator(DataUpdateCoordinator):
             return True
     
     @callback
+    def _renewal_failed(self, clu_id: str, failed: int) -> None:
+        """A renewal failed twice in a row while the CLU answers pings.
+        
+        The CLU may have dropped the sessions (they expire when not renewed),
+        so the cached state may no longer be kept up to date. Entities become
+        unavailable, and every contact (e.g. the next ping response) tries to
+        register again until it succeeds.
+        """
+        if not self._connectivity[clu_id].mark_unsynced():
+            return
+        self._renewal_lost.add(clu_id)
+        _LOGGER.warning("[%s] CLU answers pings but did not accept %d of its session(s) twice in a row; "
+                        "its entities are unavailable until it does", clu_id, failed)
+        self._async_connectivity_changed(clu_id)
+    
+    @callback
     def _sync_succeeded(self, clu_id: str) -> None:
         """Every session is registered: entities may show their state."""
         connectivity = self._connectivity[clu_id]
         if not connectivity.mark_synced():
             return
+        
+        if clu_id in self._renewal_lost and clu_id not in self._offline_since:
+            self._renewal_lost.discard(clu_id)
+            _LOGGER.info("[%s] CLU accepted its sessions again; state refreshed, entities available", clu_id)
+            self._async_connectivity_changed(clu_id)
+            return
+        self._renewal_lost.discard(clu_id)
         
         if clu_id in self._offline_since:
             last_contact = self._offline_since.pop(clu_id)

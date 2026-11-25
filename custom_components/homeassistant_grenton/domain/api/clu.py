@@ -19,6 +19,7 @@ from .clu_messages import (
     GrentonCluApiClientRegisterResponse,
     GrentonCluApiClientReportNotification,
     GrentonCluApiActionRequest,
+    is_emergency_payload,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,6 +67,15 @@ class ActionResult(Enum):
     SUPERSEDED = "superseded"
     # No answer after every attempt.
     FAILED = "failed"
+
+
+class PingResult(Enum):
+    """Outcome of a checkAlive() ping."""
+
+    OK = "ok"
+    # The CLU answered "emergency": reachable, but its project is not running.
+    EMERGENCY = "emergency"
+    NO_ANSWER = "no_answer"
 
 
 class GrentonCluApi:
@@ -118,11 +128,11 @@ class GrentonCluApi:
             _LOGGER.debug("[%s] Closed UDP socket", self.clu.id)
             self.transport = None
         
-    async def ping(self) -> bool:
+    async def ping(self) -> PingResult:
         """Send a keep-alive ping to the CLU."""
         if not self.protocol:
             _LOGGER.warning("[%s] No protocol available for ping", self.clu.id)
-            return False
+            return PingResult.NO_ANSWER
         
         request = GrentonCluApiPingRequest(self.keep_alive_id)
         # The coordinator counts failed pings and logs the outcome, so a ping
@@ -130,9 +140,10 @@ class GrentonCluApi:
         wire_message = await self.protocol.send_request(request, timeout_log_level=logging.DEBUG)
         
         if wire_message is None:
-            return False
-        
-        return True
+            return PingResult.NO_ANSWER
+        if is_emergency_payload(wire_message.split(":", 3)[3]):
+            return PingResult.EMERGENCY
+        return PingResult.OK
     
     async def register_session(
         self,
@@ -303,7 +314,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         message_id = parts[2].lower()
         _LOGGER.debug("[%s][%s] Received: %s", self.api.clu.name, message_id, wire_message)
         
-        if self.contact_callback:
+        # A CLU in emergency mode answers, but does not run its project: its
+        # answers are not contact. The ping that got one reports it.
+        if self.contact_callback and not is_emergency_payload(parts[3]):
             try:
                 self.contact_callback()
             except Exception as e:  # pragma: no cover - defensive

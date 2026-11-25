@@ -66,6 +66,18 @@ class CluConnectivity:
         self.synced = False
         return ConnectivityTransition.DISCONNECTED
 
+    def mark_unsynced(self) -> bool:
+        """Mark the cached state as no longer kept up to date by the CLU.
+
+        Used while the CLU answers pings but its sessions are gone (they could
+        not be renewed, or it restarted). Returns True if entities became
+        unavailable.
+        """
+        if not self.synced:
+            return False
+        self.synced = False
+        return self.connected is True
+
     def mark_synced(self) -> bool:
         """Mark the state as refreshed. Returns True if entities became available."""
         if self.connected is not True or self.synced:

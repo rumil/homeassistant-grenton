@@ -3,6 +3,16 @@ from __future__ import annotations
 from .base import GrentonCluApiRequest, GrentonCluApiResponse
 
 
+def is_emergency_payload(payload: str) -> bool:
+    """True for the answer of a CLU in emergency mode.
+
+    In emergency mode a CLU answers checkAlive() with ``emergency`` (Object
+    Manager capture in the opengr8on docs): it is reachable, but its project
+    is not running, so subscriptions and actions do not work.
+    """
+    return payload.strip().strip('"').lower() == "emergency"
+
+
 class GrentonCluApiPingRequest(GrentonCluApiRequest):
     """Ping request to check if CLU is alive."""
     

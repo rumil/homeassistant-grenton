@@ -147,7 +147,7 @@ def test_ping_and_register_share_the_in_flight_limit():
 
     results, transport = asyncio.run(run())
 
-    assert results == [OK] * 5 + [True] * 5
+    assert results == [OK] * 5 + [clu_api.PingResult.OK] * 5
     assert transport.max_outstanding == 1
     assert transport.max_in_flight_seen == 1
 
@@ -374,3 +374,18 @@ def test_request_too_long_for_the_clu_is_not_sent(caplog):
     assert result is clu_api.ActionResult.FAILED
     assert transport.sent == []
     assert any("too long for the CLU" in r.getMessage() for r in caplog.records)
+
+
+def test_emergency_answer_to_a_ping_is_not_contact():
+    contacts = []
+
+    async def run():
+        api, transport = make_api()
+        api.protocol.contact_callback = lambda: contacts.append(1)
+        transport._respond = lambda msg_id: api.protocol.datagram_received(
+            transport.cipher.encrypt(f"resp:{CLU_IP}:{msg_id}:emergency".encode()), (CLU_IP, 1234)
+        )
+        return await api.ping()
+
+    assert asyncio.run(run()) is clu_api.PingResult.EMERGENCY
+    assert contacts == []
