@@ -131,14 +131,43 @@ Codes 5–9, negative numbers, non-integral numbers and values above 99999 are i
 
 ## 🔁 CLU restart signal
 
-A CLU keeps its User Features, and the subscriptions through which it reports changes to Home Assistant, in RAM. When it restarts (power cut, project upload, crash), its User Features come back with their initial values and it stops reporting changes until it is subscribed again. A restart can be quicker than the connectivity sensor's 3 failed pings, so the integration detects it from the CLU's own uptime: feature 0 of the CLU object (`CLU<serial>:get(0)`, seconds since the last reset), read before every subscription renewal (every 30 s), as soon as the CLU answers again after a failed ping, and after an outage. An uptime lower than expected means the CLU restarted.
+A CLU keeps its User Features, and the subscriptions through which it reports changes to Home Assistant, in RAM. When it restarts (power cut, project upload, crash), its User Features come back with their initial values and it stops reporting changes until it is subscribed again. A restart can be quicker than the connectivity sensor's 3 failed pings, so the integration detects it from the CLU's own uptime: feature 0 of the CLU object (`CLU<serial>:get(0)`, seconds since the last reset). The uptime is read before every subscription is registered or renewed (every 30 s, as soon as the CLU answers again after a failed ping, and after an outage), and nowhere else, so it adds one small request per renewal and nothing to pushed updates. An uptime lower than expected means the CLU restarted.
 
-When a restart is detected:
+When a restart is detected, in this order:
 
-1. Every entity of that CLU becomes `unavailable`. The state it showed before the restart is the `from_state` of this transition.
-2. The integration subscribes again and reads every value from the CLU.
-3. The entities become available again, showing the CLU's state after the restart.
-4. `sensor.grenton_clu_last_boot` changes to the new boot time, and the event `grenton_clu_restarted` is fired.
+1. Every entity of that CLU becomes `unavailable` (after an outage they already are). The state it showed before is the `from_state` of this transition.
+2. `sensor.grenton_clu_last_boot` is written with the new boot time and the attribute `restart_detected_at`.
+3. The integration subscribes again and reads every value from the CLU.
+4. The entities become available again, showing the CLU's state after the restart.
+5. The event `grenton_clu_restarted` is fired.
+
+### Telling a restart from an outage
+
+When an entity of the CLU goes from `unavailable` to a value, an automation can tell whether a restart happened during that unavailable period:
+
+```jinja
+{% set r = state_attr('sensor.grenton_clu_last_boot', 'restart_detected_at') %}
+{{ r is not none and as_datetime(r) >= trigger.from_state.last_changed }}
+```
+
+- **True:** the CLU restarted. The values that follow are the CLU's state after the restart: User Features as the CLU initialised them, plus anything changed on the CLU since.
+- **False:** no restart was detected. The values may include changes made on the CLU while the entity was unavailable, e.g. wall-button presses during an outage.
+
+What this relies on, for the integration's own entities while it runs:
+
+- `restart_detected_at` is set when a restart is detected, never earlier than the moment the CLU's entities went unavailable for it, and before any of them shows a value from after the restart. This holds on every path an entity comes back on: a restart found at a renewal, right after a failed ping, after an outage (the restart happened while the CLU was unreachable), after the CLU stopped accepting its subscriptions, and when the first re-read after the restart failed.
+- An entity never comes back from `unavailable` while it is not known whether the CLU restarted. If the uptime cannot be read, entities that are unavailable stay so; available entities become unavailable when a second read 3 s later fails too, and come back once the uptime is read.
+- Without a restart, `restart_detected_at` and the sensor's state do not change.
+- `restart_detected_at` keeps its value until the next restart, so after a later outage it is earlier than `from_state.last_changed`.
+
+Use `restart_detected_at` rather than the sensor's `last_changed`: the sensor's state is also written, without a restart, once when the integration starts or reloads and, if Home Assistant started while the CLU was unreachable, when the CLU first answers (from unknown to its boot time, right before the entities come back).
+
+Edge cases and what is not guaranteed:
+
+- **Home Assistant startup and integration reload:** `restart_detected_at` is null and there is no earlier uptime to compare with, so a restart that happened while Home Assistant was down or during the reload is not detected: the values after startup can be the CLU's initial values with nothing marking them. Handle startup separately, e.g. with a `homeassistant` start trigger.
+- **Uptime unsupported or never answered:** after 3 reads in a row without a number before any read worked since startup (a CLU that does not report it; its entities never become unavailable for this), or 10 in a row after reads worked (a safety valve, so a CLU that stops answering the query cannot keep its entities unavailable for good), detection is off until Home Assistant restarts, with a warning in the log. From then on no restart is reported: every return from `unavailable` reads as an outage, and the sensor keeps its last value (unknown if it never had one).
+- **A restart during an outage** is detected when the CLU answers again. `restart_detected_at` is then the moment the CLU came back, later than the moment the entities went unavailable for the outage. Several restarts within one unavailable period count as one.
+- **Not guaranteed:** a CLU that kept its subscriptions through a restart (a reboot loses them; a reset that keeps them has not been seen) would push its reset values as ordinary changes until the next uptime read, without going through `unavailable`. The comparison relies on Home Assistant's clock not being set back between the two writes. The rule applies to the integration's own entities; an entity of another integration that follows one (e.g. a switch shown as a light) writes its own states, later.
 
 ### Event `grenton_clu_restarted`
 
@@ -148,12 +177,11 @@ When a restart is detected:
 | `serial_number` | `221010475` | The CLU's serial number |
 | `boot_time` | `2026-11-24T22:17:20.512+00:00` | When the CLU booted (UTC, ISO 8601), computed from its uptime, accurate to about 2 s |
 | `uptime` | `31` | The CLU's uptime in seconds when the restart was detected |
+| `detected_at` | `2026-11-24T22:17:51.204+00:00` | When the restart was detected: the same value as `restart_detected_at` |
 
-- **When it fires:** once per detected restart, while Home Assistant is running: as soon as the CLU answers again after a failed ping (a restart practically always makes a ping fail), at the latest with the next renewal (30 s).
-- **What holds when it fires:** the integration is subscribed again and has read every subscribed value after the restart. Every entity of that CLU is available and shows the CLU's current state: User Features as the CLU initialised them, plus anything that changed since. `sensor.grenton_clu_last_boot` already shows the new boot time. If reading the state fails, the event waits until it succeeds.
-- **When it does not fire:** at Home Assistant startup or when the integration reloads (there is no earlier uptime to compare with), so a CLU that restarted while Home Assistant was down is not reported; for an outage without a restart; on a CLU that does not report its uptime (the last-boot sensor stays unknown and a warning is logged).
-
-A blueprint triggers on it with:
+- **When it fires:** once per detected restart, after step 4: as soon as the CLU answers again after a failed ping (a restart practically always makes a ping fail), at the latest with the next renewal (30 s). If re-reading the state fails, the event waits until it succeeds.
+- **What holds when it fires:** every entity of that CLU is available and shows the CLU's state after the restart, and `sensor.grenton_clu_last_boot` already shows the new boot time. Use it for actions that need the whole CLU back, e.g. a restore that writes several User Features.
+- **When it does not fire:** in the cases above where no restart is detected.
 
 ```yaml
 triggers:
@@ -166,9 +194,7 @@ triggers:
 
 ### Sensor `sensor.grenton_clu_last_boot`
 
-A diagnostic timestamp sensor on the CLU device (`sensor.grenton_clu_<serial>_last_boot` with several CLUs). It gets its value from the uptime when the integration starts and changes only when a restart is detected, at the same moment as the event. It stays available while the CLU is not responding. A state trigger on it with `not_from: [unknown, unavailable]` is equivalent to the event.
-
-> **Note:** Automations that react to Grenton entity states see a restart as `unavailable` followed by the CLU's new state, the same as after an outage. The step from `unavailable` is the CLU's state after the restart, not a user action.
+A diagnostic timestamp sensor on the CLU device (`sensor.grenton_clu_<serial>_last_boot` with several CLUs): when the CLU last booted, with the attribute `restart_detected_at` described above. It gets its value from the CLU's first uptime reading after the integration starts, and changes after that only when a restart is detected (step 2). It stays available while the CLU is not responding.
 
 ## 🎨 Device Classes & Units
 

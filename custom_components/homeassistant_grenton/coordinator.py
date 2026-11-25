@@ -5,6 +5,7 @@ import logging
 import asyncio
 import time
 from datetime import datetime, timedelta
+from enum import Enum
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.core import HomeAssistant, callback
@@ -36,10 +37,25 @@ RENEW_INTERVAL = 30
 # Seconds before the sessions whose renewal failed are tried again, instead
 # of waiting for the next renewal.
 RENEW_RETRY_DELAY = 3.0
-# Answers to the uptime query that are not a number, in a row, after which
-# restart detection is turned off for the CLU (e.g. a firmware without the
-# feature). No answer at all does not count: it can be a lost packet.
-UPTIME_MAX_BAD_ANSWERS = 3
+# Uptime reads in a row without a number (no answer, or an answer that is
+# not a number), after which restart detection is turned off for the CLU:
+# - before any reading worked since startup: the CLU most likely does not
+#   support it (e.g. a firmware without the feature);
+# - after readings worked: only a safety valve, so a CLU that stops answering
+#   the query cannot keep its entities unavailable for good.
+UPTIME_MAX_FAILURES_UNREAD = 3
+UPTIME_MAX_FAILURES = 10
+
+
+class UptimeCheck(Enum):
+    """Outcome of reading a CLU's uptime before registering its sessions."""
+
+    # Read: a restart, if any, is handled (last-boot sensor already written).
+    KNOWN = "known"
+    # No usable answer this time: whether the CLU restarted is not known.
+    UNKNOWN = "unknown"
+    # Restart detection is off for this CLU.
+    OFF = "off"
 
 class GrentonCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry, clus: list[GrentonClu], encryption: GrentonEncryption):
@@ -81,9 +97,15 @@ class GrentonCoordinator(DataUpdateCoordinator):
         # announced once the state was read again).
         self._clock: Callable[[], float] = time.monotonic
         self._uptime: dict[str, UptimeTracker] = {clu.id: UptimeTracker() for clu in clus}
-        self._uptime_bad_answers: dict[str, int] = {}
+        self._uptime_failures: dict[str, int] = {}
+        self._uptime_read: set[str] = set()
         self._uptime_disabled: set[str] = set()
+        # CLUs whose entities are unavailable because their uptime could not
+        # be read, so it is not known whether they restarted.
+        self._uptime_unknown: set[str] = set()
         self._boot_time: dict[str, datetime] = {}
+        # When the latest restart was detected, per CLU (since startup).
+        self._restart_detected_at: dict[str, datetime] = {}
         self._pending_restart: dict[str, RestartInfo] = {}
         self._boot_listeners: dict[str, list[Callable[[], None]]] = {clu.id: [] for clu in clus}
         # Set once async_setup has done the initial sync. Before that, contact
@@ -198,19 +220,32 @@ class GrentonCoordinator(DataUpdateCoordinator):
     async def _async_sync(self, clu_id: str, reason: str) -> bool:
         """Register (or renew) every session of the CLU and re-read its state.
         
-        ``reason`` is "startup", "resync" (entities unavailable, e.g. after a
-        reconnect), "renew" (periodic, while available) or "gap" (while
+        ``reason`` is "startup", "resync" (entities unavailable, e.g. after an
+        outage), "renew" (periodic, while available) or "gap" (while
         available, after a ping failed and the CLU answered again).
         
-        The CLU's uptime is read first: a restart makes the entities
-        unavailable before its new state is applied (see ``_check_restart``).
+        This is the only place sessions are registered, and the CLU's uptime
+        is always read first, so whether the CLU restarted is known before any
+        value from a registration is shown:
+        
+        - A restart makes the entities unavailable and writes the new boot
+          time to the last-boot sensor before registering
+          (``_restart_detected``). The values arrive while the entities are
+          unavailable and are shown when they become available again.
+        - When the uptime cannot be read, entities that are unavailable stay
+          so, and entities that are available become unavailable when a
+          second read 3 s later fails too (registering without knowing could
+          show a restarted CLU's reset values as ordinary changes). Every
+          contact then tries again. Startup is the exception: there is no
+          earlier reading to compare with anyway.
         
         Entities that are unavailable become available only after every
         session was registered. On failure the next contact (e.g. the next
         ping response) starts another attempt. A failed renewal is tried
         again after RENEW_RETRY_DELAY.
         
-        Returns True when every session was registered.
+        Returns True when every session was registered and the entities may
+        show their state.
         """
         periodic = reason in ("renew", "gap")
         async with self._sync_locks[clu_id]:
@@ -220,7 +255,16 @@ class GrentonCoordinator(DataUpdateCoordinator):
             if connectivity.connected is not True:
                 return False
             
-            await self._check_restart(clu_id)
+            uptime = await self._check_restart(clu_id)
+            if uptime is UptimeCheck.UNKNOWN and periodic:
+                await asyncio.sleep(RENEW_RETRY_DELAY)
+                uptime = await self._check_restart(clu_id)
+                if uptime is UptimeCheck.UNKNOWN and connectivity.mark_unsynced():
+                    self._uptime_unknown.add(clu_id)
+                    _LOGGER.warning("[%s] The CLU's uptime could not be read twice in a row, so it is not "
+                                    "known whether it restarted; its entities are unavailable until it is",
+                                    clu_id)
+                    self._async_connectivity_changed(clu_id)
             
             failed = await self._register_sessions(clu_id, self._get_sessions(clu_id))
             if failed and periodic:
@@ -233,6 +277,10 @@ class GrentonCoordinator(DataUpdateCoordinator):
             if failed:
                 if not periodic:
                     _LOGGER.debug("[%s] State refresh failed, retrying on next contact", clu_id)
+                return False
+            
+            if uptime is UptimeCheck.UNKNOWN and reason != "startup":
+                _LOGGER.debug("[%s] Not known whether the CLU restarted; retrying on next contact", clu_id)
                 return False
             
             self._sync_succeeded(clu_id)
@@ -268,38 +316,41 @@ class GrentonCoordinator(DataUpdateCoordinator):
                              clu_id, last_contact.isoformat() if last_contact else "never")
             elif clu_id in self._renewal_lost and restart is None:
                 _LOGGER.info("[%s] CLU accepted its sessions again; state refreshed, entities available", clu_id)
+            elif clu_id in self._uptime_unknown and restart is None:
+                _LOGGER.info("[%s] CLU uptime read again, no restart; entities available", clu_id)
             else:
                 _LOGGER.debug("[%s] CLU state synced", clu_id)
             self._renewal_lost.discard(clu_id)
+            self._uptime_unknown.discard(clu_id)
             self._async_connectivity_changed(clu_id)
         
         if restart is not None:
             self._announce_restart(clu_id, restart)
     
-    async def _check_restart(self, clu_id: str) -> None:
+    async def _check_restart(self, clu_id: str) -> UptimeCheck:
         """Read the CLU's uptime and handle a restart since the last reading.
         
-        A restarted CLU has lost its sessions and reset its User Features, so
-        the cached state is stale: the CLU's entities become unavailable (as
-        after an outage), and the restart is announced once the sessions are
-        registered again and the new state was read (``_announce_restart``).
-        The first reading only records when the CLU booted.
+        The first reading only records when the CLU booted. A restart is
+        handled by ``_restart_detected`` before this returns.
         """
         if clu_id in self._uptime_disabled:
-            return
+            return UptimeCheck.OFF
         answer = await self._apis[clu_id].read_uptime()
-        if answer is None:
-            _LOGGER.debug("[%s] No answer to the uptime query", clu_id)
-            return
-        if isinstance(answer, str):
-            count = self._uptime_bad_answers.get(clu_id, 0) + 1
-            self._uptime_bad_answers[clu_id] = count
-            if count >= UPTIME_MAX_BAD_ANSWERS:
-                self._uptime_disabled.add(clu_id)
-                _LOGGER.warning("[%s] CLU answered the uptime query with %r, not a number of seconds; "
-                                "restart detection is off until Home Assistant restarts", clu_id, answer)
-            return
-        self._uptime_bad_answers[clu_id] = 0
+        if answer is None or isinstance(answer, str):
+            failures = self._uptime_failures.get(clu_id, 0) + 1
+            self._uptime_failures[clu_id] = failures
+            limit = UPTIME_MAX_FAILURES if clu_id in self._uptime_read else UPTIME_MAX_FAILURES_UNREAD
+            _LOGGER.debug("[%s] Uptime not read (%d/%d): %s", clu_id, failures, limit,
+                          "no answer" if answer is None else repr(answer))
+            if failures < limit:
+                return UptimeCheck.UNKNOWN
+            self._uptime_disabled.add(clu_id)
+            _LOGGER.warning("[%s] The CLU's uptime could not be read %d times in a row (last: %s); restart "
+                            "detection is off until Home Assistant restarts", clu_id, failures,
+                            "no answer" if answer is None else f"answer {answer!r}, not a number of seconds")
+            return UptimeCheck.OFF
+        self._uptime_failures[clu_id] = 0
+        self._uptime_read.add(clu_id)
         
         boot_time = dt_util.utcnow() - timedelta(seconds=answer)
         restarted = self._uptime[clu_id].observe(answer, self._clock())
@@ -307,21 +358,41 @@ class GrentonCoordinator(DataUpdateCoordinator):
             self._boot_time[clu_id] = boot_time
             _LOGGER.debug("[%s] CLU booted at %s (uptime %d s)", clu_id, boot_time.isoformat(), answer)
             self._notify_boot_listeners(clu_id)
-            return
-        if not restarted:
-            return
+        elif restarted:
+            self._restart_detected(clu_id, RestartInfo(boot_time=boot_time, uptime=answer))
+        return UptimeCheck.KNOWN
+    
+    @callback
+    def _restart_detected(self, clu_id: str, restart: RestartInfo) -> None:
+        """Handle a detected restart, before any post-restart value is shown.
         
-        self._pending_restart[clu_id] = RestartInfo(boot_time=boot_time, uptime=answer)
-        _LOGGER.warning("[%s] CLU restarted at %s (uptime %d s): it lost its subscriptions and reset its "
-                        "User Features; re-reading its state", clu_id, boot_time.isoformat(), answer)
-        if self._connectivity[clu_id].mark_unsynced():
+        A restarted CLU has lost its sessions and reset its User Features, so
+        the cached state is stale. In this order:
+        
+        1. the CLU's entities become unavailable (as after an outage; already
+           so after an outage);
+        2. the last-boot sensor is written with the new boot time and
+           ``restart_detected_at``;
+        3. (by the caller) the sessions are registered again, and the entities
+           show the new state only when that succeeded;
+        4. the restart event is fired (``_announce_restart``).
+        """
+        connectivity = self._connectivity[clu_id]
+        if connectivity.mark_unsynced():
             self._async_connectivity_changed(clu_id)
+        self._boot_time[clu_id] = restart.boot_time
+        # Taken after the unavailable states were written, so it is never
+        # earlier than the moment an entity went unavailable for this restart.
+        self._restart_detected_at[clu_id] = dt_util.utcnow()
+        self._pending_restart[clu_id] = restart
+        _LOGGER.warning("[%s] CLU restarted at %s (uptime %d s): it lost its subscriptions and reset its "
+                        "User Features; re-reading its state", clu_id, restart.boot_time.isoformat(),
+                        restart.uptime)
+        self._notify_boot_listeners(clu_id)
     
     @callback
     def _announce_restart(self, clu_id: str, restart: RestartInfo) -> None:
-        """Publish a restart: entities are available and show the new state."""
-        self._boot_time[clu_id] = restart.boot_time
-        self._notify_boot_listeners(clu_id)
+        """Fire the restart event: entities are available and show the new state."""
         api = self._apis[clu_id]
         _LOGGER.info("[%s] State re-read after the CLU restart; entities available", clu_id)
         self.hass.bus.async_fire(
@@ -331,12 +402,18 @@ class GrentonCoordinator(DataUpdateCoordinator):
                 "serial_number": api.clu.serial_number,
                 "boot_time": restart.boot_time.isoformat(),
                 "uptime": int(restart.uptime),
+                "detected_at": self._restart_detected_at[clu_id].isoformat(),
             },
         )
     
     def get_boot_time(self, clu_id: str) -> datetime | None:
         """When the CLU last booted, or None before its uptime was read."""
         return self._boot_time.get(clu_id)
+    
+    def get_restart_detected_at(self, clu_id: str) -> datetime | None:
+        """When the latest restart of the CLU was detected, or None if none
+        was detected since the integration started."""
+        return self._restart_detected_at.get(clu_id)
     
     @callback
     def async_add_boot_listener(self, clu_id: str, callback_fn: Callable[[], None]) -> Callable[[], None]:
@@ -467,22 +544,6 @@ class GrentonCoordinator(DataUpdateCoordinator):
             if values is None:
                 failed.append(session)
         return failed
-    
-    async def _send_register(self, clu_id: str) -> bool:
-        """Register every session of a CLU and store the values from the answers.
-        
-        Returns True when the whole state was refreshed from the CLU.
-        """
-        if clu_id not in self._apis:
-            _LOGGER.warning("[%s] No API found for CLU during state registration", clu_id)
-            return False
-        
-        if not self.state.clus[clu_id].has_states_to_register():
-            _LOGGER.debug("[%s] No component states to register", clu_id)
-            return True
-        
-        failed = await self._register_sessions(clu_id, self._get_sessions(clu_id))
-        return not failed
     
     @callback
     def _apply_register_values(

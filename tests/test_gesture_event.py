@@ -309,7 +309,7 @@ def test_ordinary_updates_do_not_write_state(tmp_path, monkeypatch):
 
             # Report caused by another key, periodic resync, pings.
             await h.push(10)
-            await h.coordinator._send_register(CLU_ID)
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
             await h.settle()
             h.coordinator.async_update_listeners()
             for _ in range(3):
@@ -358,7 +358,7 @@ def test_push_right_after_register_answer_wins_and_fires_once(tmp_path, monkeypa
             # Register answer (an older snapshot, 40) and a push with the next
             # press (51) arrive back to back.
             h.fake.answer_then_push(40, 51)
-            await h.coordinator._send_register(CLU_ID)
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
             await h.settle()
             assert h.coordinator.get_value_for_component(h.entity.state_object) == 51
             assert h.events == [("single", {"sequence": 5})]

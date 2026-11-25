@@ -154,6 +154,8 @@ class FakeClu:
         self.outputs = {"DOU0001": 1, "DOU0002": 0}
         # Seconds since the CLU booted, answered to CLU...:get(0)
         self.uptime: object = 100000
+        # False: uptime queries get no answer
+        self.answer_uptime = True
         self.sent: list[str] = []
         # session ID -> object names, in registration order
         self.sessions: dict[int, list[str]] = {}
@@ -174,6 +176,8 @@ class FakeClu:
             self.sessions[session_id] = re.findall(r"\{(\w+),\d+\}", match.group(2))
             answer = self._report(session_id)
         elif payload == f"{CLU_ID}:get(0)":
+            if not self.answer_uptime:
+                return
             answer = str(self.uptime)
         else:
             answer = "0"
@@ -236,6 +240,11 @@ class Harness:
         self.restarts: list[tuple[dict, list[bool], list[bool | None]]] = []
         # Switch availability at every coordinator update
         self.availability: list[list[bool]] = []
+        # Every state write as HA would get it, in order, with its time:
+        # ("switch", unique_id, available, is_on, time)
+        # ("last_boot", boot time, restart_detected_at, time)
+        # ("event", data, time)
+        self.timeline: list[tuple] = []
 
     async def ping(self):
         await self.coordinator._send_ping(CLU_ID)
@@ -252,7 +261,7 @@ class Harness:
             await asyncio.sleep(0)
 
 
-async def setup_harness(tmp_path, monkeypatch):
+async def setup_harness(tmp_path, monkeypatch, start_hung=False, uptime=100000):
     # Short timeouts so requests to a hung CLU fail quickly.
     for name in ("RESPONSE_TIMEOUT", "PING_TIMEOUT", "REGISTER_TIMEOUT", "ACTION_TIMEOUT", "QUERY_TIMEOUT", "DESTROY_TIMEOUT"):
         monkeypatch.setattr(clu_api, name, 0.05)
@@ -273,6 +282,8 @@ async def setup_harness(tmp_path, monkeypatch):
     async def fake_connect():
         api.protocol = clu_api.GrentonCluApiProtocol(api)
         api.transport = holder["fake"] = FakeClu(api.protocol, api.cipher)
+        holder["fake"].hung = start_hung
+        holder["fake"].uptime = uptime
         return True
 
     api.connect = fake_connect
@@ -283,16 +294,29 @@ async def setup_harness(tmp_path, monkeypatch):
 
     restarts = []
 
+    timeline: list[tuple] = []
+
     @ha_core.callback
     def on_restart(event):
         restarts.append((dict(event.data), [s.available for s in switches], [s.is_on for s in switches]))
+        timeline.append(("event", dict(event.data), dt_util.utcnow()))
 
     hass.bus.async_listen(EVENT_CLU_RESTARTED, on_restart)
 
     await coordinator.async_setup()
     harness = Harness(hass, coordinator, holder["fake"], switches, sensor, boot_sensor)
     harness.restarts = restarts
+    harness.timeline = timeline
     coordinator.async_add_listener(lambda: harness.availability.append([s.available for s in switches]))
+
+    # The switches write their state on every coordinator update, as
+    # CoordinatorEntity does once added to HA.
+    for switch in switches:
+        def record_switch(switch=switch):
+            timeline.append(("switch", switch.unique_id, switch.available, switch.is_on, dt_util.utcnow()))
+
+        switch.async_write_ha_state = record_switch
+        coordinator.async_add_listener(switch._handle_coordinator_update)
 
     # Count sensor state writes without a full entity platform.
     def count_write():
@@ -300,6 +324,8 @@ async def setup_harness(tmp_path, monkeypatch):
 
     def count_boot_write():
         harness.boot_sensor_writes += 1
+        timeline.append(("last_boot", boot_sensor.native_value,
+                         boot_sensor.extra_state_attributes["restart_detected_at"], dt_util.utcnow()))
 
     sensor.async_write_ha_state = count_write
     sensor._remember_written()
@@ -607,7 +633,7 @@ def test_nil_in_register_answer_shows_unknown_not_off(tmp_path, monkeypatch):
         h = await setup_harness(tmp_path, monkeypatch)
         try:
             h.fake.outputs = {"DOU0001": "nil", "DOU0002": 1}
-            await h.coordinator._send_register(CLU_ID)
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
             await h.settle()
             assert h.coordinator.get_value_for_component(h.switches[0].state_object) is None
             assert h.switches[0].is_on is None
@@ -684,7 +710,8 @@ def test_register_answer_for_another_session_fails_the_registration(tmp_path, mo
                 f"clientReport:{session_id}:", "clientReport:1:"
             )
             h.fake.outputs = {"DOU0001": 0, "DOU0002": 1}
-            assert await h.coordinator._send_register(CLU_ID) is False
+            sessions = h.coordinator._get_sessions(CLU_ID)
+            assert await h.coordinator._register_sessions(CLU_ID, sessions) == sessions
             # Values meant for another session were not applied.
             assert h.switches[0].is_on is True
             assert h.switches[1].is_on is False
@@ -968,59 +995,6 @@ def test_long_outage_without_restart_fires_no_event(tmp_path, monkeypatch):
     run(scenario())
 
 
-def test_restart_is_announced_only_after_the_state_was_read(tmp_path, monkeypatch):
-    monkeypatch.setattr(coordinator_module, "RENEW_RETRY_DELAY", 0.01)
-
-    async def scenario():
-        h = await setup_harness(tmp_path, monkeypatch)
-        try:
-            h.fake.reboot()
-            drop_next_registers(h.fake, 2)
-            assert await h.coordinator._run_sync(CLU_ID, "renew") is False
-            assert not any(s.available for s in h.switches)
-            assert h.restarts == []
-            assert h.boot_sensor_writes == 0
-
-            # The next contact refreshes the state; only then the event.
-            await h.ping()
-            assert all(s.available for s in h.switches)
-            assert len(h.restarts) == 1
-            assert h.restarts[0][0]["uptime"] == 5
-            assert h.boot_sensor_writes == 1
-        finally:
-            await teardown(h)
-
-    run(scenario())
-
-
-def test_clu_without_uptime_turns_detection_off(tmp_path, monkeypatch, caplog):
-    async def scenario():
-        h = await setup_harness(tmp_path, monkeypatch)
-        try:
-            assert h.boot_sensor.native_value is not None
-        finally:
-            await teardown(h)
-
-        h = await setup_harness(tmp_path, monkeypatch)
-        try:
-            h.fake.uptime = "nil"
-            for _ in range(coordinator_module.UPTIME_MAX_BAD_ANSWERS):
-                assert await h.coordinator._run_sync(CLU_ID, "renew") is True
-            h.fake.sent.clear()
-            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
-            assert f"{CLU_ID}:get(0)" not in h.fake.sent
-            assert h.restarts == []
-        finally:
-            await teardown(h)
-
-    with caplog.at_level(logging.WARNING):
-        run(scenario())
-
-    warnings = [r.getMessage() for r in caplog.records if "restart detection is off" in r.getMessage()]
-    assert len(warnings) == 1
-
-
-
 def test_unload_destroys_every_session(tmp_path, monkeypatch):
     monkeypatch.setattr(registration, "MAX_ENTRIES_PER_SESSION", 1)
 
@@ -1047,3 +1021,364 @@ def test_unload_skips_destroy_while_clu_is_not_responding(tmp_path, monkeypatch)
 
     h = run(scenario())
     assert h.fake.sent == []
+
+
+# --- Ordering: last_boot before any post-restart value ----------------------------
+#
+# What a blueprint relies on (README, "CLU restart signal"): when an entity goes
+# unavailable -> value after a CLU restart, sensor.grenton_clu_last_boot already
+# holds the new boot time, and its restart_detected_at attribute is not earlier
+# than the moment the entity went unavailable. After an outage without a
+# restart, last_boot is not written at all.
+
+
+def writes(h, kind, start=0):
+    return [(i, entry) for i, entry in enumerate(h.timeline) if entry[0] == kind and i >= start]
+
+
+def assert_restart_ordering(h, start, uptime=5):
+    """The writes after ``start`` follow the restart contract."""
+    boots = writes(h, "last_boot", start)
+    assert len(boots) == 1, boots
+    b, (_, boot_time, detected_at, _) = boots[0]
+    assert abs(boot_time.timestamp() - (dt_util.utcnow().timestamp() - uptime)) < 5
+    assert detected_at is not None
+
+    switch_writes = writes(h, "switch", start)
+    # Each switch went unavailable (in this window) before last_boot changed...
+    went_unavailable = {}
+    for i, (_, uid, available, _, at) in switch_writes:
+        if not available and uid not in went_unavailable:
+            went_unavailable[uid] = (i, at)
+    assert set(went_unavailable) == {s.unique_id for s in h.switches}
+    assert all(i < b for i, _ in went_unavailable.values())
+    # ...no switch showed a value from then until last_boot changed...
+    first_unavailable = min(i for i, _ in went_unavailable.values())
+    assert not [i for i, entry in switch_writes if first_unavailable < i < b and entry[2]]
+    # ...and every value shown after it comes after last_boot.
+    shown = [(i, entry) for i, entry in switch_writes if i > first_unavailable and entry[2]]
+    assert shown and all(i > b for i, _ in shown)
+    # The blueprint rule: restart_detected_at >= the moment each entity went unavailable.
+    assert all(detected_at >= at for _, at in went_unavailable.values())
+    # The event comes after the values, with the same detection time.
+    events = writes(h, "event", start)
+    assert len(events) == 1 and events[0][0] > shown[0][0]
+    assert events[0][1][1]["detected_at"] == detected_at.isoformat()
+    return detected_at
+
+
+def mark(h):
+    return len(h.timeline)
+
+
+def test_order_restart_detected_at_renewal(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.reboot()
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
+            assert_restart_ordering(h, start)
+            assert [s.is_on for s in h.switches] == [False, False]
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_order_restart_detected_after_a_failed_ping(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.hung = True
+            await h.ping()
+            h.fake.reboot()
+            h.fake.hung = False
+            await h.ping()
+            assert_restart_ordering(h, start)
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_order_restart_during_an_outage(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.hung = True
+            for _ in range(3):
+                await h.ping()
+            assert not any(s.available for s in h.switches)
+            h.fake.reboot()
+            h.fake.hung = False
+            await h.ping()
+            assert_restart_ordering(h, start)
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_order_restart_after_two_failed_renewals(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            drop_next_registers(h.fake, 2)
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is False
+            assert not any(s.available for s in h.switches)
+            h.fake.reboot()
+            await h.ping()
+            assert_restart_ordering(h, start)
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_order_restart_whose_first_refresh_fails(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.reboot()
+            drop_next_registers(h.fake, 2)
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is False
+            # last_boot already changed; no value shown, no event yet.
+            assert len(writes(h, "last_boot", start)) == 1
+            assert h.restarts == []
+            await h.ping()
+            assert_restart_ordering(h, start)
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_order_restart_during_outage_with_uptime_unreadable_at_first(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.hung = True
+            for _ in range(3):
+                await h.ping()
+            h.fake.reboot()
+            h.fake.answer_uptime = False
+            h.fake.hung = False
+            # The CLU answers pings and registrations, not the uptime query:
+            # its entities must not come back yet.
+            await h.ping()
+            await h.ping()
+            assert not any(s.available for s in h.switches)
+            assert writes(h, "last_boot", start) == []
+            assert not [e for _, e in writes(h, "switch", start) if e[2]]
+
+            h.fake.answer_uptime = True
+            await h.ping()
+            assert_restart_ordering(h, start)
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_order_restart_at_renewal_with_uptime_unreadable_at_first(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.reboot()
+            h.fake.answer_uptime = False
+            # Not known whether it restarted: no registration is shown as a
+            # change, the entities become unavailable instead.
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is False
+            assert not any(s.available for s in h.switches)
+            assert not [e for _, e in writes(h, "switch", start) if e[2]]
+
+            h.fake.answer_uptime = True
+            await h.ping()
+            assert_restart_ordering(h, start)
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_one_lost_uptime_read_does_not_disturb_anything(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            original_sendto = h.fake.sendto
+            dropped = []
+
+            def drop_one_uptime_query(data, addr):
+                plaintext = h.fake.cipher.decrypt(data).decode()
+                if plaintext.endswith(f"{CLU_ID}:get(0)") and not dropped:
+                    dropped.append(1)
+                    return
+                original_sendto(data, addr)
+
+            h.fake.sendto = drop_one_uptime_query
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
+            assert dropped == [1]
+            assert all(e[2] for _, e in writes(h, "switch", start))
+            assert writes(h, "last_boot", start) == []
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_unreadable_uptime_without_restart_leaves_last_boot_alone(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.answer_uptime = False
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is False
+            assert not any(s.available for s in h.switches)
+            h.fake.answer_uptime = True
+            await h.ping()
+            assert all(s.available for s in h.switches)
+            assert writes(h, "last_boot", start) == []
+            assert h.restarts == []
+        finally:
+            await teardown(h)
+
+    with caplog.at_level(logging.INFO):
+        run(scenario())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("could not be read twice in a row" in m for m in messages) == 1
+    assert sum("uptime read again, no restart" in m for m in messages) == 1
+
+
+def test_outage_without_restart_does_not_touch_last_boot(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.hung = True
+            for _ in range(3):
+                await h.ping()
+            h.fake.outputs = {"DOU0001": 0, "DOU0002": 1}  # wall presses during the outage
+            h.fake.hung = False
+            await h.ping()
+            for _ in range(3):
+                assert await h.coordinator._run_sync(CLU_ID, "renew") is True
+            assert all(s.available for s in h.switches)
+            assert [s.is_on for s in h.switches] == [False, True]
+            assert writes(h, "last_boot", start) == []
+            assert h.boot_sensor.extra_state_attributes["restart_detected_at"] is None
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_outage_after_a_restart_is_told_apart_by_restart_detected_at(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            start = mark(h)
+            h.fake.reboot()
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
+            detected_at = assert_restart_ordering(h, start)
+
+            # Later an outage without a restart: restart_detected_at stays
+            # earlier than the moment the entities went unavailable.
+            start = mark(h)
+            h.fake.hung = True
+            for _ in range(3):
+                await h.ping()
+            h.fake.hung = False
+            await h.ping()
+            assert writes(h, "last_boot", start) == []
+            went_unavailable = [e[4] for _, e in writes(h, "switch", start) if not e[2]]
+            assert went_unavailable and all(detected_at < at for at in went_unavailable)
+            assert h.boot_sensor.extra_state_attributes["restart_detected_at"] == detected_at
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_startup_sets_last_boot_without_restart_detected_at(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            assert_boot_time(h, 100000)
+            assert h.boot_sensor.extra_state_attributes == {"restart_detected_at": None}
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_startup_while_clu_is_down_reads_boot_time_without_a_restart(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch, start_hung=True)
+        try:
+            assert h.boot_sensor.native_value is None
+            h.fake.hung = False
+            await h.ping()
+            assert all(s.available for s in h.switches)
+            # First reading: a boot time, but no restart.
+            assert_boot_time(h, 100000)
+            assert h.boot_sensor.extra_state_attributes["restart_detected_at"] is None
+            assert h.restarts == []
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_clu_that_never_reports_uptime_turns_detection_off_without_a_gap(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch, uptime="nil")
+        try:
+            start = mark(h)
+            # Startup (1) and one renewal with its re-read (2, 3): detection
+            # is off, and the entities never became unavailable.
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
+            assert all(e[2] for _, e in writes(h, "switch", start))
+            h.fake.sent.clear()
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
+            assert f"{CLU_ID}:get(0)" not in h.fake.sent
+            assert h.boot_sensor.native_value is None
+            assert h.restarts == []
+        finally:
+            await teardown(h)
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario())
+
+    warnings = [r.getMessage() for r in caplog.records if "restart detection is off" in r.getMessage()]
+    assert len(warnings) == 1 and "'nil'" in warnings[0]
+
+
+def test_uptime_that_stops_answering_is_given_up_on_eventually(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            h.fake.answer_uptime = False
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is False
+            assert not any(s.available for s in h.switches)
+            for _ in range(coordinator_module.UPTIME_MAX_FAILURES):
+                await h.ping()
+                if all(s.available for s in h.switches):
+                    break
+            assert all(s.available for s in h.switches)
+        finally:
+            await teardown(h)
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario())
+
+    warnings = [r.getMessage() for r in caplog.records if "restart detection is off" in r.getMessage()]
+    assert len(warnings) == 1 and "no answer" in warnings[0]
