@@ -297,15 +297,25 @@ class GrentonCoordinator(DataUpdateCoordinator):
         # State is never set optimistically here. Entity state only changes
         # when the CLU reports a new value, so after a failed action the entity
         # keeps showing the real (previous) state.
+        #
+        # A command the CLU never confirmed raises, so the service call that
+        # sent it fails visibly (an error in the UI, a stopped automation run)
+        # instead of looking successful. The CLU may still have executed it:
+        # only its answer is known to be missing.
+        # Capture the payload now: entities mutate their action objects,
+        # and the request may wait in the CLU queue before it is sent.
+        payload = GrentonCluApiActionRequest.from_action(action).payload
         try:
-            # Capture the payload now: entities mutate their action objects,
-            # and the request may wait in the CLU queue before it is sent.
-            payload = GrentonCluApiActionRequest.from_action(action).payload
             result = await api.execute_action(action)
-            if result is ActionResult.FAILED:
-                _LOGGER.warning("[%s] Action execution failed for payload: %s", action.clu_id, payload)
         except Exception as e:
             _LOGGER.error("[%s] Error executing action: %s", action.clu_id, e)
+            raise HomeAssistantError(
+                f"Grenton CLU {action.clu_id}: error sending {payload}: {e}"
+            ) from e
+        if result is ActionResult.FAILED:
+            raise HomeAssistantError(
+                f"Grenton CLU {action.clu_id} did not confirm {payload}"
+            )
     
     async def _process_report(self, clu_id: str, values: list[GrentonValue]) -> None:
         """Process a report from a CLU and update state values.

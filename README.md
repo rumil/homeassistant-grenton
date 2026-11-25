@@ -22,6 +22,7 @@ Your support helps maintain features, fix bugs, and improve documentation.
 - **⚙️ Per-Entity Configuration** - Customize device class and unit of measurement for each supported entity through the UI
 - **🔄 Real-time Updates** - Automatic state synchronization with Grenton system
 - **📡 CLU Connectivity Monitoring** - A diagnostic `binary_sensor` per CLU (`binary_sensor.grenton_clu_connectivity` with a single CLU) goes off after 3 failed pings in a row. While a CLU is not responding its entities are unavailable and actions fail immediately; when it responds again its state is re-read from the CLU before the entities become available
+- **✅ Confirmed Commands** - Every command waits for the CLU's answer. A write (`setVar`, `set`) is retried up to 3 times, 2 s each; a command the CLU never confirms fails its service call with an error, so the UI and automations see it (the CLU may still have executed it; only its answer is missing)
 - **🌍 Multi-language Support** - Fully translated UI in English and Polish
 - **📱 Modern UI** - Native Home Assistant integration with clean configuration flows
 

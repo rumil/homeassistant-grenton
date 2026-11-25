@@ -16,6 +16,7 @@ class GrentonCluApiActionRequest(GrentonCluApiRequest):
     Supports variable, attribute, method, and script actions.
     """
     
+    kind = "action"
     idempotent: bool
     target: tuple[str, ...] | None
     

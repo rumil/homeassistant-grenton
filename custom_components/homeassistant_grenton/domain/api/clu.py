@@ -28,8 +28,20 @@ _LOGGER = logging.getLogger(__name__)
 # this limit.
 MAX_IN_FLIGHT_REQUESTS = 1
 
-# Seconds to wait for a response. Counted from the moment the datagram is
-# sent, not from the moment the request was queued.
+# Seconds to wait for a response, per kind of request. Counted from the
+# moment the datagram is sent, not from the moment the request was queued.
+# A CLU on the local network answers in tens of milliseconds, so these leave
+# a wide margin for a CLU busy running a script.
+#
+# Pings keep 5 s: hang detection (3 failed pings in a row) is built on it.
+PING_TIMEOUT = 5.0
+# A registration answer carries the values of every key in the session.
+REGISTER_TIMEOUT = 5.0
+# One attempt of an action. An action runs inside the service call that
+# sent it, so a short attempt keeps automations and the UI responsive:
+# 3 attempts take at most 6 s.
+ACTION_TIMEOUT = 2.0
+# Any other request.
 RESPONSE_TIMEOUT = 5.0
 
 # Extra attempts for an idempotent action whose response timed out
@@ -203,6 +215,11 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         self._pending: Dict[str, asyncio.Future[str]] = {}
         self._pending_lock = asyncio.Lock()
         self._response_timeout = RESPONSE_TIMEOUT
+        self._timeouts: dict[str, float] = {
+            "ping": PING_TIMEOUT,
+            "register": REGISTER_TIMEOUT,
+            "action": ACTION_TIMEOUT,
+        }
         self._request_gap = REQUEST_GAP
         self._max_in_flight = MAX_IN_FLIGHT_REQUESTS
         self._slots = asyncio.Semaphore(MAX_IN_FLIGHT_REQUESTS)
@@ -381,8 +398,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
                         self.api.clu.name, msg_id, e)
             return None
         
+        timeout = self._timeouts.get(getattr(request, "kind", ""), self._response_timeout)
         try:
-            return await asyncio.wait_for(future, timeout=self._response_timeout)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             async with self._pending_lock:
                 self._pending.pop(msg_id, None)

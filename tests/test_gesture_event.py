@@ -110,8 +110,9 @@ class Harness:
 
 
 async def setup_harness(tmp_path, monkeypatch, start_hung=False):
-    # Short timeout so pings to a hung CLU fail quickly.
-    monkeypatch.setattr(clu_api, "RESPONSE_TIMEOUT", 0.05)
+    # Short timeouts so requests to a hung CLU fail quickly.
+    for name in ("RESPONSE_TIMEOUT", "PING_TIMEOUT", "REGISTER_TIMEOUT", "ACTION_TIMEOUT"):
+        monkeypatch.setattr(clu_api, name, 0.05)
 
     hass = ha_core.HomeAssistant(str(tmp_path))
     frame.async_setup(hass)

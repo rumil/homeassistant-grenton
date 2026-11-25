@@ -11,6 +11,8 @@ class GrentonCluApiRequest:
     msg_id: str
     payload: str
     raw: str
+    # Kind of request, used to pick its response timeout.
+    kind: str = "request"
     
     def __init__(self, payload: str, msg_id: str | None = None):
         """Initialize with payload and optional message ID.

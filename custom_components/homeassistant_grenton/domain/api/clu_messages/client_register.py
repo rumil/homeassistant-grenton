@@ -30,6 +30,7 @@ def _parse_client_report_payload(payload: str) -> list[GrentonValue]:
 class GrentonCluApiClientRegisterRequest(GrentonCluApiRequest):
     """Request to register component states for subscription."""
     
+    kind = "register"
     keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey]
     
     def __init__(self, keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey], msg_id: str | None = None):

@@ -99,6 +99,7 @@ def make_api(response_timeout=1.0, request_gap=0.0, **transport_kwargs):
     api = clu_api.GrentonCluApi(clu, encryption)
     protocol = clu_api.GrentonCluApiProtocol(api)
     protocol._response_timeout = response_timeout
+    protocol._timeouts = {kind: response_timeout for kind in protocol._timeouts}
     protocol._request_gap = request_gap
     api.protocol = protocol
     transport = FakeCluTransport(protocol, api.cipher, **transport_kwargs)
@@ -329,3 +330,33 @@ def test_same_object_other_feature_is_not_a_newer_write():
     payloads = [payload for _, payload in transport.sent]
     assert payloads == ['THE0001:set(3,"22")', 'THE0001:set(3,"22")', 'THE0001:set(8,"0")']
     assert set_point is OK and mode is OK
+
+
+def test_each_kind_of_request_has_its_own_timeout():
+    async def run():
+        api, transport = make_api(drop=lambda *_: True)
+        api.protocol._timeouts = {"ping": 0.15, "action": 0.05, "register": 0.1}
+        loop = asyncio.get_running_loop()
+        elapsed = {}
+        start = loop.time()
+        await api.ping()
+        elapsed["ping"] = loop.time() - start
+        start = loop.time()
+        await api.execute_action(GrentonActionMethod(
+            clu_id="CLU221010475", object_name="DOU0001",
+            event=GrentonActionEventType.CLICK, value="0", index="1",
+        ))
+        elapsed["action"] = loop.time() - start
+        return elapsed
+
+    elapsed = asyncio.run(run())
+    assert 0.14 <= elapsed["ping"] < 0.25
+    assert 0.04 <= elapsed["action"] < 0.1
+
+
+def test_default_timeouts():
+    # Actions run inside the service call: 3 attempts must stay short.
+    assert clu_api.ACTION_TIMEOUT * (1 + clu_api.ACTION_RETRIES) <= 6.0
+    # Hang detection is built on 5 s pings; registrations get as long.
+    assert clu_api.PING_TIMEOUT == 5.0
+    assert clu_api.REGISTER_TIMEOUT >= clu_api.ACTION_TIMEOUT

@@ -193,8 +193,9 @@ class Harness:
 
 
 async def setup_harness(tmp_path, monkeypatch):
-    # Short timeout so pings to a hung CLU fail quickly.
-    monkeypatch.setattr(clu_api, "RESPONSE_TIMEOUT", 0.05)
+    # Short timeouts so requests to a hung CLU fail quickly.
+    for name in ("RESPONSE_TIMEOUT", "PING_TIMEOUT", "REGISTER_TIMEOUT", "ACTION_TIMEOUT"):
+        monkeypatch.setattr(clu_api, name, 0.05)
 
     hass = ha_core.HomeAssistant(str(tmp_path))
     frame.async_setup(hass)
@@ -531,6 +532,33 @@ def test_nil_in_register_answer_shows_unknown_not_off(tmp_path, monkeypatch):
             assert h.coordinator.get_value_for_component(h.switches[0].state_object) is None
             assert h.switches[0].is_on is None
             assert h.switches[1].is_on is True
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_unconfirmed_action_raises(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            original_sendto = h.fake.sendto
+
+            def drop_actions(data, addr):
+                plaintext = h.fake.cipher.decrypt(data).decode()
+                if ":set(" in plaintext:
+                    h.fake.sent.append(plaintext.split(":", 3)[3])
+                    return
+                original_sendto(data, addr)
+
+            h.fake.sendto = drop_actions
+            h.fake.sent.clear()
+            with pytest.raises(HomeAssistantError, match="did not confirm"):
+                await h.switches[1].async_turn_on()
+            assert h.fake.sent == ['DOU0002:set(0,"1")'] * 3
+            # The CLU still answers pings: the CLU stays connected.
+            await h.ping()
+            assert h.sensor.is_on is True
         finally:
             await teardown(h)
 
