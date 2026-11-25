@@ -15,7 +15,7 @@ from .domain.clu import GrentonClu
 from .domain.encryption import GrentonEncryption
 from .domain.state_object import GrentonStateObject
 from .domain.action import GrentonAction
-from .domain.api.clu import GrentonCluApi
+from .domain.api.clu import ActionResult, GrentonCluApi
 from .domain.connectivity import CluConnectivity, ConnectivityTransition
 from .state import GrentonState, GrentonCluState, GrentonCluStateVariableKey, GrentonCluStateAttributeKey, GrentonValue
 from .domain.api.clu_messages import GrentonCluApiActionRequest
@@ -301,8 +301,8 @@ class GrentonCoordinator(DataUpdateCoordinator):
             # Capture the payload now: entities mutate their action objects,
             # and the request may wait in the CLU queue before it is sent.
             payload = GrentonCluApiActionRequest.from_action(action).payload
-            success = await api.execute_action(action)
-            if not success:
+            result = await api.execute_action(action)
+            if result is ActionResult.FAILED:
                 _LOGGER.warning("[%s] Action execution failed for payload: %s", action.clu_id, payload)
         except Exception as e:
             _LOGGER.error("[%s] Error executing action: %s", action.clu_id, e)

@@ -34,6 +34,8 @@ from custom_components.homeassistant_grenton.domain.enums import GrentonActionEv
 
 GrentonActionAttribute = action_module.GrentonActionAttribute
 GrentonActionMethod = action_module.GrentonActionMethod
+GrentonActionVariable = action_module.GrentonActionVariable
+OK = clu_api.ActionResult.OK
 
 CLU_IP = "192.168.1.10"
 RESPONSE_DELAY = 0.02
@@ -125,7 +127,7 @@ def test_concurrent_actions_never_exceed_in_flight_limit():
 
     results, transport = asyncio.run(run())
 
-    assert results == [True] * 15
+    assert results == [OK] * 15
     assert len(transport.sent) == 15
     assert transport.max_outstanding == clu_api.MAX_IN_FLIGHT_REQUESTS == 1
     assert transport.max_in_flight_seen == 1
@@ -144,7 +146,7 @@ def test_ping_and_register_share_the_in_flight_limit():
 
     results, transport = asyncio.run(run())
 
-    assert results == [True] * 10
+    assert results == [OK] * 5 + [True] * 5
     assert transport.max_outstanding == 1
     assert transport.max_in_flight_seen == 1
 
@@ -164,7 +166,7 @@ def test_dropped_response_is_retried_with_fresh_msg_id(caplog):
     with caplog.at_level(logging.DEBUG, logger=clu_api.__name__):
         results, transport = asyncio.run(run())
 
-    assert results == [True] * 6
+    assert results == [OK] * 6
     target_ids = [msg_id for msg_id, payload in transport.sent if payload == target]
     assert len(target_ids) == 2
     assert target_ids[0] != target_ids[1]
@@ -186,7 +188,7 @@ def test_gives_up_after_three_attempts_with_single_warning(caplog):
     with caplog.at_level(logging.DEBUG, logger=clu_api.__name__):
         result, transport = asyncio.run(run())
 
-    assert result is False
+    assert result is clu_api.ActionResult.FAILED
     assert len(transport.sent) == 1 + clu_api.ACTION_RETRIES == 3
     assert len({msg_id for msg_id, _ in transport.sent}) == 3
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -209,7 +211,7 @@ def test_non_idempotent_action_is_never_retried():
 
     result, transport = asyncio.run(run())
 
-    assert result is False
+    assert result is clu_api.ActionResult.FAILED
     assert len(transport.sent) == 1
 
 
@@ -229,7 +231,7 @@ def test_late_response_to_abandoned_attempt_is_not_matched():
 
     result, transport = asyncio.run(run())
 
-    assert result is True
+    assert result is OK
     assert len(transport.sent) == 3
 
 
@@ -244,6 +246,86 @@ def test_request_gap_delays_next_send():
 
     results, transport = asyncio.run(run())
 
-    assert results == [True] * 4
+    assert results == [OK] * 4
     for answered, next_send in zip(transport.answer_times, transport.send_times[1:]):
         assert next_send - answered >= gap * 0.9
+
+
+def var_action(name, value):
+    return GrentonActionVariable(
+        clu_id="CLU221010475",
+        object_name="",
+        event=GrentonActionEventType.ON,
+        value=value,
+        index=name,
+    )
+
+
+def test_retry_never_overtakes_a_newer_write_to_the_same_target():
+    # The CLU executes "on" but its answer is lost. "off" is requested while
+    # "on" waits for its answer. The CLU must end up off.
+    def drop(msg_id, payload, attempt):
+        return payload == 'setVar("light","1")' and attempt == 1
+
+    async def run():
+        api, transport = make_api(response_timeout=0.1, drop=drop)
+        on = asyncio.create_task(api.execute_action(var_action("light", "1")))
+        await asyncio.sleep(0.01)
+        off = asyncio.create_task(api.execute_action(var_action("light", "0")))
+        return await on, await off, transport
+
+    on_result, off_result, transport = asyncio.run(run())
+
+    payloads = [payload for _, payload in transport.sent]
+    assert payloads == ['setVar("light","1")', 'setVar("light","0")']
+    assert on_result is clu_api.ActionResult.SUPERSEDED
+    assert off_result is OK
+
+
+def test_retry_of_other_target_keeps_order_and_runs_first():
+    # "on" for one light loses its answer while a write to another light
+    # waits. The retry goes out before the other write, never after it.
+    def drop(msg_id, payload, attempt):
+        return payload == 'setVar("light","1")' and attempt == 1
+
+    async def run():
+        api, transport = make_api(response_timeout=0.1, drop=drop)
+        first = asyncio.create_task(api.execute_action(var_action("light", "1")))
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(api.execute_action(var_action("other", "0")))
+        return await first, await second, transport
+
+    first, second, transport = asyncio.run(run())
+
+    payloads = [payload for _, payload in transport.sent]
+    assert payloads == ['setVar("light","1")', 'setVar("light","1")', 'setVar("other","0")']
+    assert first is OK and second is OK
+
+
+def test_same_object_other_feature_is_not_a_newer_write():
+    # A thermostat's set point and mode are separate features of one object:
+    # a write to one must not cancel the retry of the other.
+    def drop(msg_id, payload, attempt):
+        return payload == 'THE0001:set(3,"22")' and attempt == 1
+
+    def attr(index, value):
+        return GrentonActionAttribute(
+            clu_id="CLU221010475",
+            object_name="THE0001",
+            event=GrentonActionEventType.ON,
+            value=value,
+            index=index,
+        )
+
+    async def run():
+        api, transport = make_api(response_timeout=0.1, drop=drop)
+        set_point = asyncio.create_task(api.execute_action(attr("3", "22")))
+        await asyncio.sleep(0.01)
+        mode = asyncio.create_task(api.execute_action(attr("8", "0")))
+        return await set_point, await mode, transport
+
+    set_point, mode, transport = asyncio.run(run())
+
+    payloads = [payload for _, payload in transport.sent]
+    assert payloads == ['THE0001:set(3,"22")', 'THE0001:set(3,"22")', 'THE0001:set(8,"0")']
+    assert set_point is OK and mode is OK

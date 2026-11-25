@@ -1,5 +1,7 @@
 from __future__ import annotations
-from typing import Any, Optional, Dict, Callable, Awaitable
+from typing import Any, AsyncIterator, Optional, Dict, Callable, Awaitable
+from contextlib import asynccontextmanager
+from enum import Enum
 import logging
 import asyncio
 import secrets
@@ -40,6 +42,19 @@ ACTION_RETRIES = 2
 # RESPONSE_TIMEOUT.
 REQUEST_GAP = 0.0
 
+class ActionResult(Enum):
+    """Outcome of an action sent to the CLU."""
+
+    # The CLU answered the action.
+    OK = "ok"
+    # The action got no answer, and a newer write to the same target was
+    # queued meanwhile. Retrying it would only delay the newer write, which
+    # decides the final value.
+    SUPERSEDED = "superseded"
+    # No answer after every attempt.
+    FAILED = "failed"
+
+
 class GrentonCluApi:
     """Handles all communication with Grenton CLUs via UDP."""
     
@@ -52,6 +67,10 @@ class GrentonCluApi:
         self.protocol: Optional[GrentonCluApiProtocol] = None
         self.keep_alive_id = secrets.token_hex(4)
         self.subscription_id = secrets.token_hex(4)
+        # Sequence number of the newest action per write target, so a retry
+        # can tell that a newer write to the same target is waiting.
+        self._action_counter = 0
+        self._latest_write: dict[tuple[str, ...], int] = {}
         
     async def connect(self) -> bool:
         """Establish UDP connection to the CLU."""
@@ -122,37 +141,58 @@ class GrentonCluApi:
             _LOGGER.error("[%s] Failed to parse register response: %s", self.clu.id, e)
             return None
     
-    async def execute_action(self, action: GrentonAction) -> bool:
-        """Execute an action on the CLU."""
+    async def execute_action(self, action: GrentonAction) -> ActionResult:
+        """Execute an action on the CLU.
+        
+        An idempotent write (setVar, set) whose answer times out is retried,
+        all attempts in one request slot: no other request is sent between
+        them, so a retry can never overtake a newer command. A retry is
+        dropped when a newer write to the same target is already waiting:
+        that write decides the final value.
+        """
         if not self.protocol:
             _LOGGER.warning("[%s] No protocol available for action execution", self.clu.id)
-            return False
+            return ActionResult.FAILED
         
         # Build the payload before the first await: entities reuse and mutate
         # their action objects, so the value must be captured now.
         request = GrentonCluApiActionRequest.from_action(action)
         attempts = 1 + ACTION_RETRIES if request.idempotent else 1
         
-        for attempt in range(1, attempts + 1):
-            if attempt > 1:
-                request = request.with_new_msg_id()
-            
-            is_last_attempt = attempt == attempts
-            _LOGGER.debug("[%s][%s] Action attempt %d/%d: %s",
-                          self.clu.name, request.msg_id, attempt, attempts, request.payload)
-            
-            wire_message = await self.protocol.send_request(
-                request,
-                timeout_log_level=logging.WARNING if is_last_attempt else logging.DEBUG,
-            )
-            
-            if wire_message is not None:
-                if attempt > 1:
-                    _LOGGER.info("[%s][%s] Action succeeded on attempt %d/%d: %s",
-                                 self.clu.name, request.msg_id, attempt, attempts, request.payload)
-                return True
+        self._action_counter += 1
+        sequence = self._action_counter
+        if request.target is not None:
+            self._latest_write[request.target] = sequence
         
-        return False
+        try:
+            async with self.protocol.hold_slot():
+                for attempt in range(1, attempts + 1):
+                    if attempt > 1:
+                        if self._latest_write.get(request.target) != sequence:  # type: ignore[arg-type]
+                            _LOGGER.debug("[%s] Not retrying, a newer write to the same target is queued: %s",
+                                          self.clu.name, request.payload)
+                            return ActionResult.SUPERSEDED
+                        request = request.with_new_msg_id()
+                    
+                    is_last_attempt = attempt == attempts
+                    _LOGGER.debug("[%s][%s] Action attempt %d/%d: %s",
+                                  self.clu.name, request.msg_id, attempt, attempts, request.payload)
+                    
+                    wire_message = await self.protocol.send_in_held_slot(
+                        request,
+                        timeout_log_level=logging.WARNING if is_last_attempt else logging.DEBUG,
+                    )
+                    
+                    if wire_message is not None:
+                        if attempt > 1:
+                            _LOGGER.info("[%s][%s] Action succeeded on attempt %d/%d: %s",
+                                         self.clu.name, request.msg_id, attempt, attempts, request.payload)
+                        return ActionResult.OK
+        finally:
+            if request.target is not None and self._latest_write.get(request.target) == sequence:
+                del self._latest_write[request.target]
+        
+        return ActionResult.FAILED
 
 
 class GrentonCluApiProtocol(asyncio.DatagramProtocol):
@@ -274,9 +314,15 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             _LOGGER.error("[%s] Failed to encrypt request", self.api.clu.name)
             return None
         
-        self._waiting += 1
         _LOGGER.debug("[%s][%s] Queued (waiting: %d, in flight: %d/%d)",
-                      self.api.clu.name, msg_id, self._waiting, self._in_flight, self._max_in_flight)
+                      self.api.clu.name, msg_id, self._waiting + 1, self._in_flight, self._max_in_flight)
+        async with self.hold_slot():
+            return await self._send_and_wait(request, msg_id, encrypted, timeout_log_level)
+    
+    @asynccontextmanager
+    async def hold_slot(self) -> AsyncIterator[None]:
+        """Hold one request slot for several requests sent one after another."""
+        self._waiting += 1
         try:
             await self._slots.acquire()
         finally:
@@ -284,10 +330,26 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         
         self._in_flight += 1
         try:
-            return await self._send_and_wait(request, msg_id, encrypted, timeout_log_level)
+            yield
         finally:
             self._in_flight -= 1
             self._release_slot()
+    
+    async def send_in_held_slot(
+        self,
+        request: Any,
+        *,
+        timeout_log_level: int = logging.WARNING,
+    ) -> Optional[str]:
+        """Send a request from inside ``hold_slot`` and wait for its response."""
+        if not self.api.transport:
+            _LOGGER.error("[%s] Transport not ready", self.api.clu.name)
+            return None
+        encrypted = self.api.cipher.encrypt(request.raw.encode())
+        if encrypted is None:
+            _LOGGER.error("[%s] Failed to encrypt request", self.api.clu.name)
+            return None
+        return await self._send_and_wait(request, request.msg_id, encrypted, timeout_log_level)
     
     async def _send_and_wait(
         self,
