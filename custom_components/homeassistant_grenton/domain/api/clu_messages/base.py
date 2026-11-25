@@ -1,5 +1,6 @@
 from __future__ import annotations
 import secrets
+from typing import Any, Callable
 
 
 class GrentonCluApiRequest:
@@ -24,6 +25,10 @@ class GrentonCluApiRequest:
         self.payload = payload
         self.msg_id = (msg_id or secrets.token_hex(4)).lower()
         self.raw = f"req::{self.msg_id}:{self.payload}"
+        # Optional hook called with the answer as soon as it arrives, before
+        # any later datagram is handled. Its return value becomes the result
+        # of the request (None counts as failed).
+        self.on_response: Callable[[str], Any] | None = None
 
 
 class GrentonCluApiResponse:

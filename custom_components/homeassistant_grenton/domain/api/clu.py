@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, AsyncIterator, Optional, Dict, Callable, Awaitable
+from typing import Any, AsyncIterator, Optional, Dict, Callable
 from contextlib import asynccontextmanager
 from enum import Enum
 import logging
@@ -130,8 +130,22 @@ class GrentonCluApi:
         
         return True
     
-    async def register_component_states(self, keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey]) -> list[GrentonValue] | None:
-        """Register component state keys with the CLU."""
+    async def register_component_states(
+        self,
+        keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey],
+        on_values: Optional[Callable[[list[GrentonValue]], bool]] = None,
+    ) -> list[GrentonValue] | None:
+        """Register component state keys with the CLU.
+        
+        ``on_values`` is called with the values of the answer as soon as the
+        answer is received, before any datagram that arrived after it is
+        handled. Applying them there keeps the answer and pushed reports in
+        the order the CLU sent them. It returns False to reject the values,
+        which makes the registration count as failed.
+        
+        Returns the values of the answer, or None when the registration
+        failed.
+        """
         if not keys:
             _LOGGER.debug("[%s] No state keys to register", self.clu.id)
             return None
@@ -140,18 +154,19 @@ class GrentonCluApi:
             _LOGGER.warning("[%s] No protocol available for registration", self.clu.id)
             return None
         
+        def handle_answer(wire_message: str) -> list[GrentonValue] | None:
+            try:
+                values = GrentonCluApiClientRegisterResponse(wire_message).values
+            except ValueError as e:
+                _LOGGER.warning("[%s] Failed to parse register response: %s", self.clu.id, e)
+                return None
+            if on_values is not None and not on_values(values):
+                return None
+            return values
+        
         request = GrentonCluApiClientRegisterRequest(keys, self.subscription_id)
-        wire_message = await self.protocol.send_request(request)
-        
-        if wire_message is None:
-            return None
-        
-        try:
-            response = GrentonCluApiClientRegisterResponse(wire_message)
-            return response.values
-        except ValueError as e:
-            _LOGGER.error("[%s] Failed to parse register response: %s", self.clu.id, e)
-            return None
+        request.on_response = handle_answer
+        return await self.protocol.send_request(request)
     
     async def execute_action(self, action: GrentonAction) -> ActionResult:
         """Execute an action on the CLU.
@@ -212,8 +227,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
     
     def __init__(self, api: GrentonCluApi):
         self.api = api
-        self._pending: Dict[str, asyncio.Future[str]] = {}
-        self._pending_lock = asyncio.Lock()
+        # Futures of requests waiting for their answer, with the request.
+        # Everything runs on the event loop, so no lock is needed.
+        self._pending: Dict[str, tuple[asyncio.Future[Any], Any]] = {}
         self._response_timeout = RESPONSE_TIMEOUT
         self._timeouts: dict[str, float] = {
             "ping": PING_TIMEOUT,
@@ -225,7 +241,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         self._slots = asyncio.Semaphore(MAX_IN_FLIGHT_REQUESTS)
         self._waiting = 0
         self._in_flight = 0
-        self.subscription_callback: Optional[Callable[[list[GrentonValue]], Awaitable[None]]] = None
+        # Called with the values of every pushed clientReport, in the order
+        # the reports arrive.
+        self.subscription_callback: Optional[Callable[[list[GrentonValue]], None]] = None
         # Called for every valid message received from the CLU (responses,
         # including late ones, and client reports): proof that it is alive.
         self.contact_callback: Optional[Callable[[], None]] = None
@@ -260,7 +278,14 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         self._process_response(plaintext)
     
     def _process_response(self, wire_message: str) -> None:
-        """Process a response message from the CLU."""
+        """Process a message from the CLU.
+        
+        Messages are handled synchronously, one datagram at a time, so an
+        answer and the reports around it are applied in the order the CLU
+        sent them. (Handling each one in its own task let a report that
+        arrived right after a register answer be applied first, and the
+        older answer then overwrote it.)
+        """
         # Extract message_id from wire format
         parts = wire_message.split(":", 3)
         if len(parts) != 4:
@@ -276,27 +301,38 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             except Exception as e:  # pragma: no cover - defensive
                 _LOGGER.error("[%s] Error in contact callback: %s", self.api.clu.name, e)
         
-        async def _complete() -> None:
-            async with self._pending_lock:
-                fut = self._pending.pop(message_id, None)
-            
-            if fut and not fut.done():
-                fut.set_result(wire_message)
-            else:
-                # Check if this is a notification (subscription update) that needs processing
-                if GrentonCluApiMessageParser.is_client_report(wire_message):
-                    if self.subscription_callback:
-                        try:
-                            notification = GrentonCluApiClientReportNotification(wire_message)
-                            await self.subscription_callback(notification.values)
-                        except ValueError as e:
-                            _LOGGER.error("[%s] Failed to parse client report: %s", self.api.clu.name, e)
-                    else:
-                        _LOGGER.debug("[%s][%s] Received report but no callback registered", self.api.clu.name, message_id)
-                else:
-                    _LOGGER.debug("[%s][%s] Response received with no pending request", self.api.clu.name, message_id)
+        pending = self._pending.pop(message_id, None)
+        if pending is not None:
+            future, request = pending
+            if future.done():
+                return
+            result: Any = wire_message
+            on_response = getattr(request, "on_response", None)
+            if on_response is not None:
+                try:
+                    result = on_response(wire_message)
+                except Exception as e:  # pragma: no cover - defensive
+                    _LOGGER.error("[%s][%s] Error handling response: %s", self.api.clu.name, message_id, e)
+                    result = None
+            future.set_result(result)
+            return
         
-        asyncio.create_task(_complete())
+        # Check if this is a notification (subscription update) that needs processing
+        if GrentonCluApiMessageParser.is_client_report(wire_message):
+            if self.subscription_callback:
+                try:
+                    notification = GrentonCluApiClientReportNotification(wire_message)
+                except ValueError as e:
+                    _LOGGER.error("[%s] Failed to parse client report: %s", self.api.clu.name, e)
+                    return
+                try:
+                    self.subscription_callback(notification.values)
+                except Exception as e:  # pragma: no cover - defensive
+                    _LOGGER.error("[%s] Error handling client report: %s", self.api.clu.name, e)
+            else:
+                _LOGGER.debug("[%s][%s] Received report but no callback registered", self.api.clu.name, message_id)
+        else:
+            _LOGGER.debug("[%s][%s] Response received with no pending request", self.api.clu.name, message_id)
     
     async def send_request(
         self,
@@ -381,10 +417,8 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             _LOGGER.error("[%s] Transport not ready", self.api.clu.name)
             return None
         
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        
-        async with self._pending_lock:
-            self._pending[msg_id] = future
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._pending[msg_id] = (future, request)
         
         try:
             self.api.transport.sendto(encrypted, (self.api.clu.ip, self.api.clu.port))
@@ -392,8 +426,7 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
                           self.api.clu.name, msg_id, self._waiting, self._in_flight,
                           self._max_in_flight, request.raw)
         except Exception as e:
-            async with self._pending_lock:
-                self._pending.pop(msg_id, None)
+            self._pending.pop(msg_id, None)
             _LOGGER.error("[%s][%s] Failed to send request: %s", 
                         self.api.clu.name, msg_id, e)
             return None
@@ -402,13 +435,11 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            async with self._pending_lock:
-                self._pending.pop(msg_id, None)
+            self._pending.pop(msg_id, None)
             _LOGGER.log(timeout_log_level, "[%s][%s] Request timeout", self.api.clu.name, msg_id)
             return None
-        except Exception:
-            async with self._pending_lock:
-                self._pending.pop(msg_id, None)
+        except BaseException:
+            self._pending.pop(msg_id, None)
             raise
     
     def _release_slot(self) -> None:
@@ -427,14 +458,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         else:
             _LOGGER.debug("[%s] UDP connection closed", self.api.clu.name)
         
-        async def _fail_pending() -> None:
-            async with self._pending_lock:
-                futures = list(self._pending.values())
-                self._pending.clear()
-            
-            for fut in futures:
-                if not fut.done():
-                    fut.set_exception(ConnectionError(
-                        f"UDP connection closed for CLU {self.api.clu.name}"))
-        
-        asyncio.create_task(_fail_pending())
+        pending = list(self._pending.values())
+        self._pending.clear()
+        for fut, _ in pending:
+            if not fut.done():
+                fut.set_exception(ConnectionError(
+                    f"UDP connection closed for CLU {self.api.clu.name}"))

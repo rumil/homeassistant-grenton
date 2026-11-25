@@ -168,3 +168,46 @@ def test_none_and_empty_are_no_value_yet(caplog):
     assert decoder.decode(make_value(6, 1), ORIGIN_PUSH) is None
     # And the value after that fires normally.
     assert decoder.decode(make_value(7, 2), ORIGIN_PUSH) == DecodedGesture("double", 7)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_value_seen_again_after_a_stale_snapshot_does_not_fire_twice():
+    clock = FakeClock()
+    decoder = GestureDecoder(clock=clock)
+    decoder.decode(make_value(4, 0), ORIGIN_RESYNC)
+    assert decoder.decode(make_value(5, 1), ORIGIN_PUSH) == DecodedGesture("single", 5)
+    # An older snapshot moves the baseline back...
+    clock.now += 0.1
+    assert decoder.decode(make_value(4, 0), ORIGIN_RESYNC) is None
+    # ...and the next report still carries the same gesture: one press only.
+    clock.now += 0.5
+    assert decoder.decode(make_value(5, 1), ORIGIN_PUSH) is None
+
+
+def test_same_value_long_after_the_window_fires_again():
+    clock = FakeClock()
+    decoder = GestureDecoder(clock=clock)
+    decoder.decode(make_value(4, 0), ORIGIN_RESYNC)
+    assert decoder.decode(make_value(5, 1), ORIGIN_PUSH) is not None
+    decoder.decode(make_value(4, 0), ORIGIN_RESYNC)
+    clock.now += gesture_decoder.DUPLICATE_WINDOW + 1
+    assert decoder.decode(make_value(5, 1), ORIGIN_PUSH) == DecodedGesture("single", 5)
+
+
+def test_next_gesture_within_the_window_fires():
+    clock = FakeClock()
+    decoder = GestureDecoder(clock=clock)
+    decoder.decode(make_value(4, 0), ORIGIN_RESYNC)
+    assert decoder.decode(make_value(5, 1), ORIGIN_PUSH) == DecodedGesture("single", 5)
+    clock.now += 0.3
+    assert decoder.decode(make_value(6, 1), ORIGIN_PUSH) == DecodedGesture("single", 6)
+    clock.now += 0.3
+    assert decoder.decode(make_value(7, 3), ORIGIN_PUSH) == DecodedGesture("hold_start", 7)
+    assert decoder.decode(make_value(8, 4), ORIGIN_PUSH) == DecodedGesture("hold_release", 8)

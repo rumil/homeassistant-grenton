@@ -20,8 +20,9 @@ accepted and normalised to int.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # origin values
 ORIGIN_PUSH = "push"
@@ -37,6 +38,13 @@ _CODE_TO_TYPE = {
 
 _SEQ_MOD = 10000
 _MAX_VALUE = 99999
+
+# Seconds during which a gesture value that already fired never fires again.
+# The CLU clears the code about 2 s after a gesture, so the same non-idle
+# value can only come back within this window when an older value was seen
+# in between (e.g. a stale snapshot). Firing it again would turn one press
+# into two, and a toggle would then do nothing.
+DUPLICATE_WINDOW = 10.0
 
 
 @dataclass(frozen=True)
@@ -54,11 +62,20 @@ class GestureDecoder:
     given a new value and its origin, whether a gesture event should fire.
     """
 
-    def __init__(self, name: str = "gesture", logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        name: str = "gesture",
+        logger: Optional[logging.Logger] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._name = name
         self._logger = logger if logger is not None else logging.getLogger(__name__)
+        self._clock = clock
         self._last_value: Optional[int] = None
         self._invalid_seen: set[Any] = set()
+        # Value and time of the last gesture fired, for DUPLICATE_WINDOW.
+        self._last_fired_value: Optional[int] = None
+        self._last_fired_at = 0.0
 
     def decode(self, raw_value: Any, origin: str) -> Optional[DecodedGesture]:
         """Decode a raw value and return a gesture to fire, or ``None``.
@@ -120,6 +137,15 @@ class GestureDecoder:
         if code == 0:
             return None
 
+        # The same gesture value fired moments ago: a repeat, not a new press.
+        now = self._clock()
+        if value == self._last_fired_value and now - self._last_fired_at < DUPLICATE_WINDOW:
+            self._logger.debug(
+                "[%s] Ignoring repeated gesture value %d (fired %.1f s ago)",
+                self._name, value, now - self._last_fired_at,
+            )
+            return None
+
         # Warn (but still fire) if we appear to have missed gestures.
         last_seq = last // 10
         gap = (seq - last_seq) % _SEQ_MOD
@@ -128,6 +154,8 @@ class GestureDecoder:
                 "[%s] Missed %d gesture(s) (seq gap), firing latest", self._name, gap - 1
             )
 
+        self._last_fired_value = value
+        self._last_fired_at = now
         return DecodedGesture(event_type=_CODE_TO_TYPE[code], sequence=seq)
 
     @staticmethod

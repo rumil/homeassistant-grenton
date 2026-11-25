@@ -71,6 +71,29 @@ class FakeClu:
     def push_report(self):
         self._respond("00000000", f"clientReport:abcd:{{{self.gesture}}}")
 
+    def answer_then_push(self, answer_value, push_value):
+        """Answer the next clientRegister, then push a newer value at once.
+
+        Both datagrams are handled in the same event-loop pass, the answer
+        first, as the CLU sends them.
+        """
+        original = self.sendto
+
+        def sendto(data, addr):
+            plaintext = self.cipher.decrypt(data).decode()
+            _, _, msg_id, payload = plaintext.split(":", 3)
+            if not payload.startswith("SYSTEM:clientRegister"):
+                return original(data, addr)
+            self.sendto = original
+
+            def deliver():
+                self._respond(msg_id, f"clientReport:abcd:{{{answer_value}}}")
+                self._respond("00000000", f"clientReport:abcd:{{{push_value}}}")
+
+            asyncio.get_running_loop().call_soon(deliver)
+
+        self.sendto = sendto
+
     def _respond(self, msg_id, payload):
         wire = f"resp:{CLU_IP}:{msg_id}:{payload}".encode()
         self.protocol.datagram_received(self.cipher.encrypt(wire), (CLU_IP, 1234))
@@ -304,6 +327,30 @@ def test_gesture_after_reconnect_fires_one_event(tmp_path, monkeypatch):
             available, state = h.writes[0]
             assert available
             assert state == h.entity.state
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_push_right_after_register_answer_wins_and_fires_once(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            await h.push(40)
+            h.events.clear()
+
+            # Register answer (an older snapshot, 40) and a push with the next
+            # press (51) arrive back to back.
+            h.fake.answer_then_push(40, 51)
+            await h.coordinator._send_register(CLU_ID)
+            await h.settle()
+            assert h.coordinator.get_value_for_component(h.entity.state_object) == 51
+            assert h.events == [("single", {"sequence": 5})]
+
+            # A later report caused by another key carries 51 again: no event.
+            await h.push(51)
+            assert h.events == [("single", {"sequence": 5})]
         finally:
             await teardown(h)
 

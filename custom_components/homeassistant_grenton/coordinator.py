@@ -214,6 +214,9 @@ class GrentonCoordinator(DataUpdateCoordinator):
     async def _send_register(self, clu_id: str) -> bool:
         """Register the client report and store the values from the response.
         
+        The values are applied the moment the answer arrives, in order with
+        pushed reports (see ``_apply_register_values``).
+        
         Returns True when the state was refreshed from the CLU.
         """
         api = self._apis.get(clu_id)
@@ -228,25 +231,39 @@ class GrentonCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[%s] No component states to register", clu_id)
             return True
         
+        keys = list(clu_state.get_subscription_order())
         try:
-            keys = clu_state.get_subscription_order()
-            values = await api.register_component_states(keys)
-            if values:
-                values = self._matched_values(clu_id, keys, values, "Register answer")
-            if values:
-                # Update state by zipping keys with values
-                for key, value in zip(keys, values):
-                    if isinstance(key, GrentonCluStateVariableKey):
-                        clu_state.set_variable(key, value)
-                    elif isinstance(key, GrentonCluStateAttributeKey): # type: ignore
-                        clu_state.set_attribute(key, value)
-                self.async_set_updated_data(self.state.__dict__)
-                # Values arrived in a register response -> resync origin.
-                self._notify_gesture_listeners(clu_id, "resync")
-                return True
+            values = await api.register_component_states(
+                keys, on_values=lambda values: self._apply_register_values(clu_id, keys, values)
+            )
         except Exception as e:
             _LOGGER.error("[%s] Error during registration: %s", clu_id, e)
-        return False
+            return False
+        return values is not None
+    
+    @callback
+    def _apply_register_values(
+        self,
+        clu_id: str,
+        keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey],
+        values: list[GrentonValue],
+    ) -> bool:
+        """Store the values of a register answer. Returns False to reject them."""
+        if not values:
+            return False
+        matched = self._matched_values(clu_id, keys, values, "Register answer")
+        if matched is None:
+            return False
+        clu_state = self.state.clus[clu_id]
+        for key, value in zip(keys, matched):
+            if isinstance(key, GrentonCluStateVariableKey):
+                clu_state.set_variable(key, value)
+            elif isinstance(key, GrentonCluStateAttributeKey): # type: ignore
+                clu_state.set_attribute(key, value)
+        self.async_set_updated_data(self.state.__dict__)
+        # Values arrived in a register response -> resync origin.
+        self._notify_gesture_listeners(clu_id, "resync")
+        return True
     
     async def _register_loop(self) -> None:
         while True:
@@ -317,7 +334,8 @@ class GrentonCoordinator(DataUpdateCoordinator):
                 f"Grenton CLU {action.clu_id} did not confirm {payload}"
             )
     
-    async def _process_report(self, clu_id: str, values: list[GrentonValue]) -> None:
+    @callback
+    def _process_report(self, clu_id: str, values: list[GrentonValue]) -> None:
         """Process a report from a CLU and update state values.
         
         Args:
@@ -438,9 +456,7 @@ class GrentonCoordinator(DataUpdateCoordinator):
             
             # Set subscription callback to handle reports
             if api.protocol:
-                async def handle_subscription(values: list[GrentonValue]) -> None:
-                    await self._process_report(api.clu.id, values)
-                api.protocol.subscription_callback = handle_subscription
+                api.protocol.subscription_callback = lambda values: self._process_report(api.clu.id, values)
                 api.protocol.contact_callback = lambda: self._handle_contact(api.clu.id)
             else:
                 _LOGGER.error("Failed to set subscription callback for CLU %s", api.clu.id)
