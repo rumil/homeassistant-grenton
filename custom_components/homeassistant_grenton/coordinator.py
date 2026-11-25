@@ -25,6 +25,16 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+# Seconds between renewals of a CLU's clientRegister sessions. The CLU keeps
+# a session in RAM and drops it, silently, when it is not renewed in time
+# (after 60 s according to the vclu project; reports still arrive at least
+# 42 s after a renewal on a real CLU). Every 30 s, one lost renewal is
+# survived. A renewal also re-reads every subscribed value.
+RENEW_INTERVAL = 30
+# Seconds before the sessions whose renewal failed are tried again, instead
+# of waiting for the next renewal.
+RENEW_RETRY_DELAY = 3.0
+
 class GrentonCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry, clus: list[GrentonClu], encryption: GrentonEncryption):
         super().__init__(
@@ -49,7 +59,10 @@ class GrentonCoordinator(DataUpdateCoordinator):
         # is connected and its state was refreshed after the last reconnect.
         self._connectivity: dict[str, CluConnectivity] = {clu.id: CluConnectivity() for clu in clus}
         self._connectivity_listeners: dict[str, list[Callable[[], None]]] = {clu.id: [] for clu in clus}
-        self._resync_tasks: dict[str, asyncio.Task[None]] = {}
+        # Task registering a CLU's sessions (startup, resync, renewal), and a
+        # lock so two of them never run for one CLU at the same time.
+        self._sync_tasks: dict[str, asyncio.Task[bool]] = {}
+        self._sync_locks: dict[str, asyncio.Lock] = {clu.id: asyncio.Lock() for clu in clus}
         # Last contact before the CLU went disconnected, for the reconnect log.
         self._offline_since: dict[str, datetime | None] = {}
         # Set once async_setup has done the initial sync. Before that, contact
@@ -125,27 +138,63 @@ class GrentonCoordinator(DataUpdateCoordinator):
             # unavailable until the state refresh completes.
         
         if self._started and not connectivity.synced:
-            self._schedule_resync(clu_id)
+            self._schedule_sync(clu_id, "resync")
         
         self._notify_connectivity_listeners(clu_id)
     
     @callback
-    def _schedule_resync(self, clu_id: str) -> None:
-        task = self._resync_tasks.get(clu_id)
+    def _schedule_sync(self, clu_id: str, reason: str) -> None:
+        """Start a sync of the CLU unless one is already running."""
+        task = self._sync_tasks.get(clu_id)
         if task is not None and not task.done():
             return
-        self._resync_tasks[clu_id] = asyncio.create_task(self._async_resync(clu_id))
+        self._sync_tasks[clu_id] = asyncio.create_task(self._async_sync(clu_id, reason))
     
-    async def _async_resync(self, clu_id: str) -> None:
-        """Re-register the client report and refresh all states from the CLU.
+    async def _run_sync(self, clu_id: str, reason: str) -> bool:
+        """Run a sync of the CLU, or wait for the one already running."""
+        task = self._sync_tasks.get(clu_id)
+        if task is None or task.done():
+            task = self._sync_tasks[clu_id] = asyncio.create_task(self._async_sync(clu_id, reason))
+        return await task
+    
+    async def _async_sync(self, clu_id: str, reason: str) -> bool:
+        """Register (or renew) every session of the CLU and re-read its state.
         
-        Entities become available only after this succeeds. On failure the
-        next contact (e.g. the next ping response) starts another attempt.
+        ``reason`` is "startup", "resync" (entities unavailable, e.g. after a
+        reconnect) or "renew" (periodic, while available).
+        
+        Entities that are unavailable become available only after every
+        session was registered. On failure the next contact (e.g. the next
+        ping response) starts another attempt. A failed renewal is tried
+        again after RENEW_RETRY_DELAY.
+        
+        Returns True when every session was registered.
         """
-        if not await self._send_register(clu_id):
-            _LOGGER.debug("[%s] State refresh failed, retrying on next contact", clu_id)
-            return
-        
+        async with self._sync_locks[clu_id]:
+            connectivity = self._connectivity[clu_id]
+            if reason == "renew" and not connectivity.available:
+                return False
+            
+            failed = await self._register_sessions(clu_id, self._get_sessions(clu_id))
+            if failed and reason == "renew":
+                _LOGGER.debug("[%s] Renewal of %d session(s) failed, retrying in %.0f s",
+                              clu_id, len(failed), RENEW_RETRY_DELAY)
+                await asyncio.sleep(RENEW_RETRY_DELAY)
+                failed = await self._register_sessions(clu_id, failed)
+                if failed:
+                    _LOGGER.warning("[%s] Renewal of %d session(s) failed twice; next attempt in %d s",
+                                    clu_id, len(failed), RENEW_INTERVAL)
+            if failed:
+                if reason != "renew":
+                    _LOGGER.debug("[%s] State refresh failed, retrying on next contact", clu_id)
+                return False
+            
+            self._sync_succeeded(clu_id)
+            return True
+    
+    @callback
+    def _sync_succeeded(self, clu_id: str) -> None:
+        """Every session is registered: entities may show their state."""
         connectivity = self._connectivity[clu_id]
         if not connectivity.mark_synced():
             return
@@ -302,36 +351,25 @@ class GrentonCoordinator(DataUpdateCoordinator):
         self._notify_gesture_listeners(clu_id, "resync")
         return True
     
-    async def _register_loop(self) -> None:
+    async def _renew_loop(self) -> None:
+        """Renew the sessions of every available CLU every RENEW_INTERVAL.
+        
+        CLUs that are not available are resynced on contact instead.
+        """
         while True:
             try:
-                # Only register if there are actual states to register.
-                # CLUs that are not available are resynced on contact instead.
-                clu_ids_to_register = [
-                    clu_id for clu_id, clu_state in self.state.clus.items()
-                    if clu_state.has_states_to_register() and self.is_clu_available(clu_id)
-                ]
-                
-                if not clu_ids_to_register:
-                    # No states to register, wait longer before checking again
-                    await asyncio.sleep(45)
-                    continue
-                
-                # Registration interval
-                registration_interval = 45
-                await asyncio.sleep(registration_interval)
-                
+                await asyncio.sleep(RENEW_INTERVAL)
                 tasks = [
-                    self._send_register(clu_id) for clu_id in clu_ids_to_register
+                    self._run_sync(clu_id, "renew") for clu_id in self._apis
                     if self.is_clu_available(clu_id)
                 ]
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
             except asyncio.CancelledError:
-                _LOGGER.debug("Register loop cancelled")
+                _LOGGER.debug("Renew loop cancelled")
                 break
             except Exception as e:
-                _LOGGER.error("Unexpected error in register loop: %s", e)
+                _LOGGER.error("Unexpected error in renew loop: %s", e)
     
     async def execute_action(self, action: GrentonAction) -> None:
         api = self._apis.get(action.clu_id)
@@ -481,14 +519,14 @@ class GrentonCoordinator(DataUpdateCoordinator):
         
         # Send initial registrations. This also marks each responding CLU as
         # synced, so its entities start available.
-        register_tasks = [self._async_resync(clu_id) for clu_id in self.state.clus.keys()]
+        register_tasks = [self._async_sync(clu_id, "startup") for clu_id in self.state.clus.keys()]
         if register_tasks:
             await asyncio.gather(*register_tasks, return_exceptions=True)
         self._started = True
         
         # Start background tasks
         self._ping_task = asyncio.create_task(self._ping_loop())
-        self._register_task = asyncio.create_task(self._register_loop())
+        self._renew_task = asyncio.create_task(self._renew_loop())
     
     async def _connect_api(self, api: GrentonCluApi) -> None:
         """Connect a single API instance."""
@@ -519,18 +557,18 @@ class GrentonCoordinator(DataUpdateCoordinator):
                 pass
             _LOGGER.debug("Cancelled ping task")
         
-        if hasattr(self, '_register_task'):
-            self._register_task.cancel()
+        if hasattr(self, '_renew_task'):
+            self._renew_task.cancel()
             try:
-                await self._register_task
+                await self._renew_task
             except asyncio.CancelledError:
                 pass
-            _LOGGER.debug("Cancelled register task")
+            _LOGGER.debug("Cancelled renew task")
         
-        for task in self._resync_tasks.values():
+        for task in self._sync_tasks.values():
             task.cancel()
-        await asyncio.gather(*self._resync_tasks.values(), return_exceptions=True)
-        self._resync_tasks.clear()
+        await asyncio.gather(*self._sync_tasks.values(), return_exceptions=True)
+        self._sync_tasks.clear()
         
         # Disconnect all APIs
         disconnect_tasks: list[Any] = []

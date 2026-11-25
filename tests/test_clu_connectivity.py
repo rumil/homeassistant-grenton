@@ -633,3 +633,62 @@ def test_register_answer_for_another_session_fails_the_registration(tmp_path, mo
             await teardown(h)
 
     run(scenario())
+
+
+def drop_next_registers(fake, count):
+    """Make the fake CLU drop the next ``count`` clientRegister requests."""
+    original_sendto = fake.sendto
+    state = {"left": count}
+
+    def sendto(data, addr):
+        plaintext = fake.cipher.decrypt(data).decode()
+        if "clientRegister" in plaintext and state["left"] > 0:
+            state["left"] -= 1
+            fake.sent.append(plaintext.split(":", 3)[3])
+            return
+        original_sendto(data, addr)
+
+    fake.sendto = sendto
+
+
+def test_renewal_interval_survives_one_lost_renewal():
+    # vclu: a session not renewed within 60 s expires.
+    assert coordinator_module.RENEW_INTERVAL * 2 <= 60
+
+
+def test_renew_loop_renews_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(coordinator_module, "RENEW_INTERVAL", 0.02)
+
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            h.fake.sent.clear()
+            await asyncio.sleep(0.1)
+            registers = [p for p in h.fake.sent if p.startswith("SYSTEM:clientRegister")]
+            assert len(registers) >= 2
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_failed_renewal_is_retried_after_a_short_delay(tmp_path, monkeypatch):
+    monkeypatch.setattr(coordinator_module, "RENEW_RETRY_DELAY", 0.01)
+
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            drop_next_registers(h.fake, 1)
+            h.fake.sent.clear()
+            h.fake.outputs = {"DOU0001": 0, "DOU0002": 1}
+            assert await h.coordinator._run_sync(CLU_ID, "renew") is True
+            registers = [p for p in h.fake.sent if p.startswith("SYSTEM:clientRegister")]
+            assert len(registers) == 2 and registers[0] == registers[1]
+            # The retry re-read the state.
+            assert h.switches[0].is_on is False
+            assert h.switches[1].is_on is True
+            assert all(s.available for s in h.switches)
+        finally:
+            await teardown(h)
+
+    run(scenario())
