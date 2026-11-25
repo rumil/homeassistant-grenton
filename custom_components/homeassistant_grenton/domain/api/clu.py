@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Optional, Dict, Callable
 from contextlib import asynccontextmanager
 from enum import Enum
+import ipaddress
 import logging
 import asyncio
 import secrets
@@ -19,6 +20,7 @@ from .clu_messages import (
     GrentonCluApiClientRegisterResponse,
     GrentonCluApiClientReportNotification,
     GrentonCluApiActionRequest,
+    GrentonCluApiClientDestroyRequest,
     GrentonCluApiQueryRequest,
     is_emergency_payload,
 )
@@ -47,6 +49,9 @@ REGISTER_TIMEOUT = 5.0
 ACTION_TIMEOUT = 2.0
 # Reading a value, e.g. the CLU's uptime.
 QUERY_TIMEOUT = 2.0
+# Ending a session when the integration unloads. Kept short: unloading
+# waits for it, and an expired session ends by itself anyway.
+DESTROY_TIMEOUT = 1.0
 # Any other request.
 RESPONSE_TIMEOUT = 5.0
 
@@ -92,7 +97,6 @@ class GrentonCluApi:
         
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.protocol: Optional[GrentonCluApiProtocol] = None
-        self.keep_alive_id = secrets.token_hex(4)
         # Session IDs of this client's clientRegister sessions start here.
         # Random per socket, so sessions of an earlier run (still alive on
         # the CLU until they expire) never share an ID with the new ones.
@@ -138,7 +142,9 @@ class GrentonCluApi:
             _LOGGER.warning("[%s] No protocol available for ping", self.clu.id)
             return PingResult.NO_ANSWER
         
-        request = GrentonCluApiPingRequest(self.keep_alive_id)
+        # A fresh message ID for every ping, so a late answer to an earlier
+        # one can never be taken for the answer to this one.
+        request = GrentonCluApiPingRequest()
         # The coordinator counts failed pings and logs the outcome, so a ping
         # timeout is not logged as a warning here.
         wire_message = await self.protocol.send_request(request, timeout_log_level=logging.DEBUG)
@@ -148,6 +154,17 @@ class GrentonCluApi:
         if is_emergency_payload(wire_message.split(":", 3)[3]):
             return PingResult.EMERGENCY
         return PingResult.OK
+    
+    async def destroy_sessions(self, sessions: list[RegistrationSession]) -> None:
+        """End this client's sessions on the CLU, so it stops reporting to a
+        socket that is about to close. Best effort: no retry, no error."""
+        if not self.protocol or not self.transport:
+            return
+        for session in sessions:
+            request = GrentonCluApiClientDestroyRequest(session.session_id)
+            answer = await self.protocol.send_request(request, timeout_log_level=logging.DEBUG)
+            _LOGGER.debug("[%s] Session %d %s", self.clu.id, session.session_id,
+                          "destroyed" if answer is not None else "not confirmed destroyed")
     
     async def read_uptime(self) -> float | str | None:
         """Read the CLU's uptime (seconds since its last reset).
@@ -279,7 +296,17 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             "register": REGISTER_TIMEOUT,
             "action": ACTION_TIMEOUT,
             "query": QUERY_TIMEOUT,
+            "destroy": DESTROY_TIMEOUT,
         }
+        # Address datagrams must come from; others are ignored. None when the
+        # configured address is not an IP literal.
+        try:
+            self._clu_address: Optional[ipaddress.IPv4Address | ipaddress.IPv6Address] = (
+                ipaddress.ip_address(api.clu.ip)
+            )
+        except ValueError:
+            self._clu_address = None
+        self._foreign_senders_logged: set[str] = set()
         self._request_gap = REQUEST_GAP
         self._max_in_flight = MAX_IN_FLIGHT_REQUESTS
         self._slots = asyncio.Semaphore(MAX_IN_FLIGHT_REQUESTS)
@@ -296,6 +323,16 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         _LOGGER.debug("[%s] UDP connection established", self.api.clu.name)
     
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        if addr and self._clu_address is not None:
+            try:
+                sender = ipaddress.ip_address(addr[0])
+            except ValueError:
+                sender = None
+            if sender != self._clu_address:
+                if addr[0] not in self._foreign_senders_logged:
+                    self._foreign_senders_logged.add(addr[0])
+                    _LOGGER.debug("[%s] Ignoring datagram from %s, not the CLU", self.api.clu.name, addr[0])
+                return
         self._handle_incoming_data(data)
     
     def _handle_incoming_data(self, data: bytes) -> None:
@@ -308,10 +345,12 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         
         try:
             plaintext = decrypted.decode().strip()
-        except Exception:
-            _LOGGER.warning("[%s] Failed to decode decrypted message: %s", 
-                          self.api.clu.name, decrypted.hex())
-            return
+        except UnicodeDecodeError:
+            # A string value in another encoding must not cost the whole
+            # report: its bytes are replaced, every other value still counts.
+            plaintext = decrypted.decode(errors="replace").strip()
+            _LOGGER.debug("[%s] Message is not valid UTF-8, undecodable bytes replaced: %s",
+                          self.api.clu.name, plaintext)
         
         # Check if it's a valid response
         if not GrentonCluApiMessageParser.is_valid_response(plaintext):

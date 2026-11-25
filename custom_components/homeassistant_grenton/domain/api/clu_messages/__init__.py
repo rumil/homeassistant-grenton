@@ -1,5 +1,6 @@
 from .action import GrentonCluApiActionRequest, GrentonCluApiActionResponse
 from .base import GrentonCluApiRequest, GrentonCluApiResponse, GrentonCluApiNotification
+from .client_destroy import GrentonCluApiClientDestroyRequest
 from .client_register import (
     GrentonCluApiClientRegisterRequest,
     GrentonCluApiClientRegisterResponse,
@@ -15,6 +16,7 @@ __all__ = [
     "GrentonCluApiRequest",
     "GrentonCluApiResponse",
     "GrentonCluApiNotification",
+    "GrentonCluApiClientDestroyRequest",
     "GrentonCluApiClientRegisterRequest",
     "GrentonCluApiClientRegisterResponse",
     "GrentonCluApiClientReportNotification",

@@ -254,8 +254,9 @@ class Harness:
 
 async def setup_harness(tmp_path, monkeypatch):
     # Short timeouts so requests to a hung CLU fail quickly.
-    for name in ("RESPONSE_TIMEOUT", "PING_TIMEOUT", "REGISTER_TIMEOUT", "ACTION_TIMEOUT", "QUERY_TIMEOUT"):
+    for name in ("RESPONSE_TIMEOUT", "PING_TIMEOUT", "REGISTER_TIMEOUT", "ACTION_TIMEOUT", "QUERY_TIMEOUT", "DESTROY_TIMEOUT"):
         monkeypatch.setattr(clu_api, name, 0.05)
+    monkeypatch.setattr(coordinator_module, "RENEW_RETRY_DELAY", 0.01)
 
     hass = ha_core.HomeAssistant(str(tmp_path))
     frame.async_setup(hass)
@@ -1017,3 +1018,32 @@ def test_clu_without_uptime_turns_detection_off(tmp_path, monkeypatch, caplog):
 
     warnings = [r.getMessage() for r in caplog.records if "restart detection is off" in r.getMessage()]
     assert len(warnings) == 1
+
+
+
+def test_unload_destroys_every_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(registration, "MAX_ENTRIES_PER_SESSION", 1)
+
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        sessions = [s.session_id for s in h.coordinator._get_sessions(CLU_ID)]
+        h.fake.sent.clear()
+        await teardown(h)
+        return h, sessions
+
+    h, sessions = run(scenario())
+    assert h.fake.sent == [f"SYSTEM:clientDestroy(0,0,{sid})" for sid in sessions]
+
+
+def test_unload_skips_destroy_while_clu_is_not_responding(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        h.fake.hung = True
+        for _ in range(3):
+            await h.ping()
+        h.fake.sent.clear()
+        await teardown(h)
+        return h
+
+    h = run(scenario())
+    assert h.fake.sent == []

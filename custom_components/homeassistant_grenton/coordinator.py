@@ -723,6 +723,16 @@ class GrentonCoordinator(DataUpdateCoordinator):
         await asyncio.gather(*self._sync_tasks.values(), return_exceptions=True)
         self._sync_tasks.clear()
         
+        # End the sessions, so the CLUs stop reporting to sockets about to
+        # close. Skipped for a CLU that is not responding.
+        destroy_tasks = [
+            api.destroy_sessions(self._sessions.get(clu_id, []))
+            for clu_id, api in self._apis.items()
+            if self._connectivity[clu_id].connected is True
+        ]
+        if destroy_tasks:
+            await asyncio.gather(*destroy_tasks, return_exceptions=True)
+        
         # Disconnect all APIs
         disconnect_tasks: list[Any] = []
         for api in self._apis.values():

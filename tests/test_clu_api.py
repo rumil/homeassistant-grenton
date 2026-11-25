@@ -443,3 +443,45 @@ def test_read_uptime_without_answer():
         return await api.read_uptime()
 
     assert asyncio.run(run()) is None
+
+
+def test_every_ping_has_its_own_message_id():
+    async def run():
+        api, transport = make_api()
+        for _ in range(3):
+            await api.ping()
+        return [msg_id for msg_id, _ in transport.sent]
+
+    ids = asyncio.run(run())
+    assert len(set(ids)) == 3
+
+
+def test_datagram_from_another_address_is_ignored():
+    contacts = []
+
+    async def run():
+        api, transport = make_api(response_timeout=0.05)
+
+        def respond_from_elsewhere(msg_id):
+            wire = f"resp:{CLU_IP}:{msg_id}:0".encode()
+            api.protocol.datagram_received(transport.cipher.encrypt(wire), ("192.168.1.99", 1234))
+
+        api.protocol.contact_callback = lambda: contacts.append(1)
+        transport._respond = respond_from_elsewhere
+        return await api.ping()
+
+    assert asyncio.run(run()) is clu_api.PingResult.NO_ANSWER
+    assert contacts == []
+
+
+def test_report_with_bytes_that_are_not_utf8_is_still_applied():
+    reports = []
+
+    async def run():
+        api, transport = make_api()
+        api.protocol.subscription_callback = lambda sid, values: reports.append((sid, values))
+        wire = b'resp:192.168.1.10:00000000:clientReport:7:{"Kuchnia \xb3", 1, 0}'
+        api.protocol.datagram_received(transport.cipher.encrypt(wire), (CLU_IP, 1234))
+
+    asyncio.run(run())
+    assert reports == [(7, ["Kuchnia \ufffd", 1, 0])]
