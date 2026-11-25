@@ -412,3 +412,34 @@ def test_answer_due_in_the_same_loop_pass_as_the_timeout_counts():
         return await api.ping()
 
     assert asyncio.run(run()) is clu_api.PingResult.OK
+
+
+def answering(transport, answer):
+    """Make the fake CLU answer every request with ``answer``."""
+    def respond(msg_id):
+        transport.outstanding.discard(msg_id)
+        wire = f"resp:{CLU_IP}:{msg_id}:{answer}".encode()
+        transport.protocol.datagram_received(transport.cipher.encrypt(wire), (CLU_IP, 1234))
+    transport._respond = respond
+
+
+def test_read_uptime():
+    async def run(answer):
+        api, transport = make_api()
+        answering(transport, answer)
+        value = await api.read_uptime()
+        return value, transport.sent
+
+    value, sent = asyncio.run(run("123456"))
+    assert value == 123456
+    assert [payload for _, payload in sent] == ["CLU221010475:get(0)"]
+    assert asyncio.run(run('"42"'))[0] == 42
+    assert asyncio.run(run("nil"))[0] == "nil"
+
+
+def test_read_uptime_without_answer():
+    async def run():
+        api, transport = make_api(response_timeout=0.05, drop=lambda *_: True)
+        return await api.read_uptime()
+
+    assert asyncio.run(run()) is None

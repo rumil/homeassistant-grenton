@@ -19,8 +19,10 @@ from .clu_messages import (
     GrentonCluApiClientRegisterResponse,
     GrentonCluApiClientReportNotification,
     GrentonCluApiActionRequest,
+    GrentonCluApiQueryRequest,
     is_emergency_payload,
 )
+from ..uptime import UPTIME_FEATURE, clu_object_name, parse_uptime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +45,8 @@ REGISTER_TIMEOUT = 5.0
 # sent it, so a short attempt keeps automations and the UI responsive:
 # 3 attempts take at most 6 s.
 ACTION_TIMEOUT = 2.0
+# Reading a value, e.g. the CLU's uptime.
+QUERY_TIMEOUT = 2.0
 # Any other request.
 RESPONSE_TIMEOUT = 5.0
 
@@ -144,6 +148,26 @@ class GrentonCluApi:
         if is_emergency_payload(wire_message.split(":", 3)[3]):
             return PingResult.EMERGENCY
         return PingResult.OK
+    
+    async def read_uptime(self) -> float | str | None:
+        """Read the CLU's uptime (seconds since its last reset).
+        
+        Returns the uptime, the answer as text when it is not an uptime (e.g.
+        ``nil`` on a firmware without the feature), or None when the CLU did
+        not answer.
+        """
+        if not self.protocol:
+            return None
+        name = clu_object_name(self.clu)
+        if name is None:
+            return f"no Lua name for CLU id {self.clu.id!r}"
+        request = GrentonCluApiQueryRequest(f"{name}:get({UPTIME_FEATURE})")
+        wire_message = await self.protocol.send_request(request, timeout_log_level=logging.DEBUG)
+        if wire_message is None:
+            return None
+        payload = wire_message.split(":", 3)[3]
+        uptime = parse_uptime(payload)
+        return payload.strip() if uptime is None else uptime
     
     async def register_session(
         self,
@@ -254,6 +278,7 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             "ping": PING_TIMEOUT,
             "register": REGISTER_TIMEOUT,
             "action": ACTION_TIMEOUT,
+            "query": QUERY_TIMEOUT,
         }
         self._request_gap = REQUEST_GAP
         self._max_in_flight = MAX_IN_FLIGHT_REQUESTS

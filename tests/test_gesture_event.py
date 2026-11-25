@@ -136,8 +136,13 @@ class Harness:
             await self.ping()
 
     async def settle(self):
-        # Let response handling and resync tasks run.
+        # Let response handling and sync tasks (resync, restart checks) run.
         for _ in range(20):
+            await asyncio.sleep(0)
+        running = [t for t in self.coordinator._sync_tasks.values() if not t.done()]
+        if running:
+            await asyncio.wait(running, timeout=2)
+        for _ in range(5):
             await asyncio.sleep(0)
 
 

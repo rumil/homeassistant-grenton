@@ -149,6 +149,9 @@
 
   "entity": {
     "sensor": {
+      "last_boot": {
+        "name": "Last boot"
+      },
       "roller_shutter_state": {
         "state": {
           "stopped": "stopped",

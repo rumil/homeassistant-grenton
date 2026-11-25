@@ -3,7 +3,8 @@ from typing import Any, Callable
 
 import logging
 import asyncio
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.core import HomeAssistant, callback
@@ -18,10 +19,11 @@ from .domain.action import GrentonAction
 from .domain.api.clu import ActionResult, GrentonCluApi, PingResult
 from .domain.connectivity import CluConnectivity, ConnectivityTransition
 from .domain.registration import RegistrationSession, plan_sessions
+from .domain.uptime import RestartInfo, UptimeTracker
 from .state import GrentonState, GrentonCluState, GrentonCluStateVariableKey, GrentonCluStateAttributeKey, GrentonValue
 from .domain.api.clu_messages import GrentonCluApiActionRequest
 
-from .const import DOMAIN
+from .const import DOMAIN, EVENT_CLU_RESTARTED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +36,10 @@ RENEW_INTERVAL = 30
 # Seconds before the sessions whose renewal failed are tried again, instead
 # of waiting for the next renewal.
 RENEW_RETRY_DELAY = 3.0
+# Answers to the uptime query that are not a number, in a row, after which
+# restart detection is turned off for the CLU (e.g. a firmware without the
+# feature). No answer at all does not count: it can be a lost packet.
+UPTIME_MAX_BAD_ANSWERS = 3
 
 class GrentonCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry, clus: list[GrentonClu], encryption: GrentonEncryption):
@@ -70,6 +76,16 @@ class GrentonCoordinator(DataUpdateCoordinator):
         # CLUs whose entities are unavailable because their sessions could
         # not be renewed while they answered pings.
         self._renewal_lost: set[str] = set()
+        # Restart detection: last uptime reading per CLU, when the CLU last
+        # booted, and a restart detected but not yet announced (it is
+        # announced once the state was read again).
+        self._clock: Callable[[], float] = time.monotonic
+        self._uptime: dict[str, UptimeTracker] = {clu.id: UptimeTracker() for clu in clus}
+        self._uptime_bad_answers: dict[str, int] = {}
+        self._uptime_disabled: set[str] = set()
+        self._boot_time: dict[str, datetime] = {}
+        self._pending_restart: dict[str, RestartInfo] = {}
+        self._boot_listeners: dict[str, list[Callable[[], None]]] = {clu.id: [] for clu in clus}
         # Set once async_setup has done the initial sync. Before that, contact
         # does not start a resync because setup registers states itself.
         self._started = False
@@ -143,6 +159,10 @@ class GrentonCoordinator(DataUpdateCoordinator):
     def _handle_contact(self, clu_id: str) -> None:
         """Handle any message received from a CLU."""
         connectivity = self._connectivity[clu_id]
+        # A ping failed since the last contact, but not enough of them to
+        # count as an outage. The CLU may have restarted in between, faster
+        # than outage detection: its sessions would then be gone.
+        after_failed_ping = connectivity.connected is True and connectivity.failed_pings > 0
         transition = connectivity.record_contact(dt_util.utcnow())
         
         if transition is ConnectivityTransition.RECONNECTED:
@@ -150,8 +170,13 @@ class GrentonCoordinator(DataUpdateCoordinator):
             # Only the connectivity sensor changes here: entities stay
             # unavailable until the state refresh completes.
         
-        if self._started and not connectivity.synced:
-            self._schedule_sync(clu_id, "resync")
+        if self._started:
+            if not connectivity.synced:
+                self._schedule_sync(clu_id, "resync")
+            elif after_failed_ping:
+                # Check for a restart and renew at once, not at the next renewal.
+                _LOGGER.debug("[%s] CLU answers again after a failed ping; checking it", clu_id)
+                self._schedule_sync(clu_id, "gap")
         
         self._notify_connectivity_listeners(clu_id)
     
@@ -174,7 +199,11 @@ class GrentonCoordinator(DataUpdateCoordinator):
         """Register (or renew) every session of the CLU and re-read its state.
         
         ``reason`` is "startup", "resync" (entities unavailable, e.g. after a
-        reconnect) or "renew" (periodic, while available).
+        reconnect), "renew" (periodic, while available) or "gap" (while
+        available, after a ping failed and the CLU answered again).
+        
+        The CLU's uptime is read first: a restart makes the entities
+        unavailable before its new state is applied (see ``_check_restart``).
         
         Entities that are unavailable become available only after every
         session was registered. On failure the next contact (e.g. the next
@@ -183,13 +212,18 @@ class GrentonCoordinator(DataUpdateCoordinator):
         
         Returns True when every session was registered.
         """
+        periodic = reason in ("renew", "gap")
         async with self._sync_locks[clu_id]:
             connectivity = self._connectivity[clu_id]
-            if reason == "renew" and not connectivity.available:
+            if periodic and not connectivity.available:
+                return False
+            if connectivity.connected is not True:
                 return False
             
+            await self._check_restart(clu_id)
+            
             failed = await self._register_sessions(clu_id, self._get_sessions(clu_id))
-            if failed and reason == "renew":
+            if failed and periodic:
                 _LOGGER.debug("[%s] Renewal of %d session(s) failed, retrying in %.0f s",
                               clu_id, len(failed), RENEW_RETRY_DELAY)
                 await asyncio.sleep(RENEW_RETRY_DELAY)
@@ -197,7 +231,7 @@ class GrentonCoordinator(DataUpdateCoordinator):
                 if failed:
                     self._renewal_failed(clu_id, len(failed))
             if failed:
-                if reason != "renew":
+                if not periodic:
                     _LOGGER.debug("[%s] State refresh failed, retrying on next contact", clu_id)
                 return False
             
@@ -224,24 +258,108 @@ class GrentonCoordinator(DataUpdateCoordinator):
     def _sync_succeeded(self, clu_id: str) -> None:
         """Every session is registered: entities may show their state."""
         connectivity = self._connectivity[clu_id]
-        if not connectivity.mark_synced():
-            return
+        restart = self._pending_restart.pop(clu_id, None)
         
-        if clu_id in self._renewal_lost and clu_id not in self._offline_since:
+        if connectivity.mark_synced():
+            if clu_id in self._offline_since:
+                last_contact = self._offline_since.pop(clu_id)
+                _LOGGER.info("[%s] CLU is responding again (last contact before the outage: %s); "
+                             "state refreshed from the CLU, entities available",
+                             clu_id, last_contact.isoformat() if last_contact else "never")
+            elif clu_id in self._renewal_lost and restart is None:
+                _LOGGER.info("[%s] CLU accepted its sessions again; state refreshed, entities available", clu_id)
+            else:
+                _LOGGER.debug("[%s] CLU state synced", clu_id)
             self._renewal_lost.discard(clu_id)
-            _LOGGER.info("[%s] CLU accepted its sessions again; state refreshed, entities available", clu_id)
             self._async_connectivity_changed(clu_id)
-            return
-        self._renewal_lost.discard(clu_id)
         
-        if clu_id in self._offline_since:
-            last_contact = self._offline_since.pop(clu_id)
-            _LOGGER.info("[%s] CLU is responding again (last contact before the outage: %s); "
-                         "state refreshed from the CLU, entities available",
-                         clu_id, last_contact.isoformat() if last_contact else "never")
-        else:
-            _LOGGER.debug("[%s] CLU state synced", clu_id)
-        self._async_connectivity_changed(clu_id)
+        if restart is not None:
+            self._announce_restart(clu_id, restart)
+    
+    async def _check_restart(self, clu_id: str) -> None:
+        """Read the CLU's uptime and handle a restart since the last reading.
+        
+        A restarted CLU has lost its sessions and reset its User Features, so
+        the cached state is stale: the CLU's entities become unavailable (as
+        after an outage), and the restart is announced once the sessions are
+        registered again and the new state was read (``_announce_restart``).
+        The first reading only records when the CLU booted.
+        """
+        if clu_id in self._uptime_disabled:
+            return
+        answer = await self._apis[clu_id].read_uptime()
+        if answer is None:
+            _LOGGER.debug("[%s] No answer to the uptime query", clu_id)
+            return
+        if isinstance(answer, str):
+            count = self._uptime_bad_answers.get(clu_id, 0) + 1
+            self._uptime_bad_answers[clu_id] = count
+            if count >= UPTIME_MAX_BAD_ANSWERS:
+                self._uptime_disabled.add(clu_id)
+                _LOGGER.warning("[%s] CLU answered the uptime query with %r, not a number of seconds; "
+                                "restart detection is off until Home Assistant restarts", clu_id, answer)
+            return
+        self._uptime_bad_answers[clu_id] = 0
+        
+        boot_time = dt_util.utcnow() - timedelta(seconds=answer)
+        restarted = self._uptime[clu_id].observe(answer, self._clock())
+        if clu_id not in self._boot_time:
+            self._boot_time[clu_id] = boot_time
+            _LOGGER.debug("[%s] CLU booted at %s (uptime %d s)", clu_id, boot_time.isoformat(), answer)
+            self._notify_boot_listeners(clu_id)
+            return
+        if not restarted:
+            return
+        
+        self._pending_restart[clu_id] = RestartInfo(boot_time=boot_time, uptime=answer)
+        _LOGGER.warning("[%s] CLU restarted at %s (uptime %d s): it lost its subscriptions and reset its "
+                        "User Features; re-reading its state", clu_id, boot_time.isoformat(), answer)
+        if self._connectivity[clu_id].mark_unsynced():
+            self._async_connectivity_changed(clu_id)
+    
+    @callback
+    def _announce_restart(self, clu_id: str, restart: RestartInfo) -> None:
+        """Publish a restart: entities are available and show the new state."""
+        self._boot_time[clu_id] = restart.boot_time
+        self._notify_boot_listeners(clu_id)
+        api = self._apis[clu_id]
+        _LOGGER.info("[%s] State re-read after the CLU restart; entities available", clu_id)
+        self.hass.bus.async_fire(
+            EVENT_CLU_RESTARTED,
+            {
+                "clu_id": clu_id,
+                "serial_number": api.clu.serial_number,
+                "boot_time": restart.boot_time.isoformat(),
+                "uptime": int(restart.uptime),
+            },
+        )
+    
+    def get_boot_time(self, clu_id: str) -> datetime | None:
+        """When the CLU last booted, or None before its uptime was read."""
+        return self._boot_time.get(clu_id)
+    
+    @callback
+    def async_add_boot_listener(self, clu_id: str, callback_fn: Callable[[], None]) -> Callable[[], None]:
+        """Register a callback for changes of the CLU's boot time."""
+        listeners = self._boot_listeners.setdefault(clu_id, [])
+        listeners.append(callback_fn)
+        
+        @callback
+        def remove_listener() -> None:
+            try:
+                listeners.remove(callback_fn)
+            except ValueError:
+                pass
+        
+        return remove_listener
+    
+    @callback
+    def _notify_boot_listeners(self, clu_id: str) -> None:
+        for callback_fn in list(self._boot_listeners.get(clu_id, [])):
+            try:
+                callback_fn()
+            except Exception as e:  # pragma: no cover - defensive
+                _LOGGER.error("[%s] Error in boot time listener: %s", clu_id, e)
     
     @callback
     def _async_connectivity_changed(self, clu_id: str) -> None:

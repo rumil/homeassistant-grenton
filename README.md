@@ -22,6 +22,7 @@ Your support helps maintain features, fix bugs, and improve documentation.
 - **⚙️ Per-Entity Configuration** - Customize device class and unit of measurement for each supported entity through the UI
 - **🔄 Real-time Updates** - Automatic state synchronization with Grenton system
 - **📡 CLU Connectivity Monitoring** - A diagnostic `binary_sensor` per CLU (`binary_sensor.grenton_clu_connectivity` with a single CLU) goes off after 3 failed pings in a row; a CLU that answers in emergency mode (its project is not running) counts as not responding. While a CLU is not responding its entities are unavailable and actions fail immediately; when it responds again its state is re-read from the CLU before the entities become available. Entities also become unavailable, with the sensor staying on, when the CLU answers pings but does not accept the renewal of its subscriptions twice in a row, until it accepts them again
+- **🔁 CLU Restart Signal** - A restart of a CLU is detected from its uptime, even when it was too quick for the connectivity sensor; its entities are refreshed, `sensor.grenton_clu_last_boot` changes and the `grenton_clu_restarted` event is fired (see [CLU restart signal](#-clu-restart-signal))
 - **✅ Confirmed Commands** - Every command waits for the CLU's answer. A write (`setVar`, `set`) is retried up to 3 times, 2 s each; a command the CLU never confirms fails its service call with an error, so the UI and automations see it (the CLU may still have executed it; only its answer is missing)
 - **🌍 Multi-language Support** - Fully translated UI in English and Polish
 - **📱 Modern UI** - Native Home Assistant integration with clean configuration flows
@@ -127,6 +128,47 @@ Codes 5–9, negative numbers, non-integral numbers and values above 99999 are i
 > **Note:** After adding or renaming the `HA Events` page in Object Manager, run **Configure → Rediscover devices** for the integration to pick up the new event entities.
 
 > **Note:** A gesture entity's `entity_id` is fixed when it is first registered and does not change if you later rename the widget (only the friendly name updates). Choose the final widget label before the first **Rediscover devices** so your automations reference a stable `entity_id`.
+
+## 🔁 CLU restart signal
+
+A CLU keeps its User Features, and the subscriptions through which it reports changes to Home Assistant, in RAM. When it restarts (power cut, project upload, crash), its User Features come back with their initial values and it stops reporting changes until it is subscribed again. A restart can be quicker than the connectivity sensor's 3 failed pings, so the integration detects it from the CLU's own uptime: feature 0 of the CLU object (`CLU<serial>:get(0)`, seconds since the last reset), read before every subscription renewal (every 30 s), as soon as the CLU answers again after a failed ping, and after an outage. An uptime lower than expected means the CLU restarted.
+
+When a restart is detected:
+
+1. Every entity of that CLU becomes `unavailable`. The state it showed before the restart is the `from_state` of this transition.
+2. The integration subscribes again and reads every value from the CLU.
+3. The entities become available again, showing the CLU's state after the restart.
+4. `sensor.grenton_clu_last_boot` changes to the new boot time, and the event `grenton_clu_restarted` is fired.
+
+### Event `grenton_clu_restarted`
+
+| Field | Example | Meaning |
+|-------|---------|---------|
+| `clu_id` | `CLU221010475` | The CLU's id from the myGrenton interface (its Lua object name) |
+| `serial_number` | `221010475` | The CLU's serial number |
+| `boot_time` | `2026-11-24T22:17:20.512+00:00` | When the CLU booted (UTC, ISO 8601), computed from its uptime, accurate to about 2 s |
+| `uptime` | `31` | The CLU's uptime in seconds when the restart was detected |
+
+- **When it fires:** once per detected restart, while Home Assistant is running: as soon as the CLU answers again after a failed ping (a restart practically always makes a ping fail), at the latest with the next renewal (30 s).
+- **What holds when it fires:** the integration is subscribed again and has read every subscribed value after the restart. Every entity of that CLU is available and shows the CLU's current state: User Features as the CLU initialised them, plus anything that changed since. `sensor.grenton_clu_last_boot` already shows the new boot time. If reading the state fails, the event waits until it succeeds.
+- **When it does not fire:** at Home Assistant startup or when the integration reloads (there is no earlier uptime to compare with), so a CLU that restarted while Home Assistant was down is not reported; for an outage without a restart; on a CLU that does not report its uptime (the last-boot sensor stays unknown and a warning is logged).
+
+A blueprint triggers on it with:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: grenton_clu_restarted
+    # With several CLUs, pick one:
+    # event_data:
+    #   clu_id: CLU221010475
+```
+
+### Sensor `sensor.grenton_clu_last_boot`
+
+A diagnostic timestamp sensor on the CLU device (`sensor.grenton_clu_<serial>_last_boot` with several CLUs). It gets its value from the uptime when the integration starts and changes only when a restart is detected, at the same moment as the event. It stays available while the CLU is not responding. A state trigger on it with `not_from: [unknown, unavailable]` is equivalent to the event.
+
+> **Note:** Automations that react to Grenton entity states see a restart as `unavailable` followed by the CLU's new state, the same as after an outage. The step from `unavailable` is the CLU's state after the restart, not a user action.
 
 ## 🎨 Device Classes & Units
 

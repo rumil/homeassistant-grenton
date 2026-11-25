@@ -6,6 +6,7 @@ from .client_register import (
     GrentonCluApiClientReportNotification,
 )
 from .parser import GrentonCluApiMessageParser
+from .query import GrentonCluApiQueryRequest
 from .ping import GrentonCluApiPingRequest, GrentonCluApiPingResponse, is_emergency_payload
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "GrentonCluApiClientRegisterResponse",
     "GrentonCluApiClientReportNotification",
     "GrentonCluApiMessageParser",
+    "GrentonCluApiQueryRequest",
     "GrentonCluApiPingRequest",
     "GrentonCluApiPingResponse",
     "is_emergency_payload",
