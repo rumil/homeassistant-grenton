@@ -146,6 +146,9 @@ class FakeClu:
         values = ",".join(str(self.outputs[name]) for name in ("DOU0001", "DOU0002"))
         self._respond("00000000", f"clientReport:abcd:{{{values}}}")
 
+    def push_raw(self, table):
+        self._respond("00000000", f"clientReport:abcd:{table}")
+
     def _respond(self, msg_id, payload):
         wire = f"resp:{CLU_IP}:{msg_id}:{payload}".encode()
         self.protocol.datagram_received(self.cipher.encrypt(wire), (CLU_IP, 1234))
@@ -460,6 +463,58 @@ def test_connectivity_sensor_definition(tmp_path, monkeypatch):
             assert sensor.unique_id == f"clu_{CLU_ID}_connectivity"
             # Suggested on first registration; HA automations reference it.
             assert sensor.entity_id == "binary_sensor.grenton_clu_connectivity"
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_report_with_too_many_values_is_ignored(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            assert h.switches[0].is_on is True
+            assert h.switches[1].is_on is False
+            for _ in range(2):
+                h.fake.push_raw("{0,1,1}")
+                await h.settle()
+            assert h.switches[0].is_on is True
+            assert h.switches[1].is_on is False
+        finally:
+            await teardown(h)
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario())
+
+    warnings = [r.getMessage() for r in caplog.records if "values for 2 subscribed keys" in r.getMessage()]
+    assert warnings == ["[CLU221010475] Report has 3 values for 2 subscribed keys; ignored"]
+
+
+def test_report_with_fewer_values_updates_first_keys(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            h.fake.push_raw("{0}")
+            await h.settle()
+            assert h.switches[0].is_on is False
+            assert h.switches[1].is_on is False
+        finally:
+            await teardown(h)
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario())
+
+    assert any("applied to the first 1 keys" in r.getMessage() for r in caplog.records)
+
+
+def test_string_with_comma_does_not_shift_later_values(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            h.fake.push_raw('{"a,b",1}')
+            await h.settle()
+            assert h.coordinator.get_value_for_component(h.switches[0].state_object) == "a,b"
+            assert h.switches[1].is_on is True
         finally:
             await teardown(h)
 

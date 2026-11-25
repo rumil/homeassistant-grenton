@@ -4,31 +4,27 @@ from ....state import (
     GrentonCluStateVariableKey,
     GrentonCluStateAttributeKey,
     GrentonValue,
-    cast_string_to_grenton_value,
 )
 from .base import GrentonCluApiRequest, GrentonCluApiResponse, GrentonCluApiNotification
+from .lua_literal import parse_lua_table
 
 
 def _parse_client_report_payload(payload: str) -> list[GrentonValue]:
-    """Parse the clientReport payload into GrentonValue list."""
+    """Parse a ``clientReport:<session>:{...}`` payload into its values.
+
+    Raises:
+        ValueError: when the payload is not a clientReport or its table
+            cannot be parsed. A report that cannot be parsed must not be
+            applied: guessing would put values on the wrong keys.
+    """
     if not payload.startswith("clientReport:"):
-        return []
+        raise ValueError(f"Not a clientReport: {payload!r}")
     
     report_parts = payload.split(":", 2)
     if len(report_parts) != 3:
-        return []
+        raise ValueError(f"Invalid clientReport: {payload!r}")
     
-    data_payload = report_parts[2]
-    
-    if not (data_payload.startswith("{") and data_payload.endswith("}")):
-        return []
-    
-    content = data_payload[1:-1].strip()
-    if not content:
-        return []
-    
-    raw_values = content.split(",")
-    return [cast_string_to_grenton_value(value.strip().strip('"')) for value in raw_values]
+    return parse_lua_table(report_parts[2])
 
 
 class GrentonCluApiClientRegisterRequest(GrentonCluApiRequest):

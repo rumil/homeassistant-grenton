@@ -55,6 +55,9 @@ class GrentonCoordinator(DataUpdateCoordinator):
         # does not start a resync because setup registers states itself.
         self._started = False
 
+        # Value-count mismatches already logged, so each is logged once.
+        self._count_mismatch_logged: set[tuple[str, str, int, int]] = set()
+
         # Listeners for gesture entities. Each entry pairs the entity's state
         # object with a synchronous callback receiving (value, origin), where
         # origin is "push" (clientReport) or "resync" (register response).
@@ -229,6 +232,8 @@ class GrentonCoordinator(DataUpdateCoordinator):
             keys = clu_state.get_subscription_order()
             values = await api.register_component_states(keys)
             if values:
+                values = self._matched_values(clu_id, keys, values, "Register answer")
+            if values:
                 # Update state by zipping keys with values
                 for key, value in zip(keys, values):
                     if isinstance(key, GrentonCluStateVariableKey):
@@ -310,13 +315,43 @@ class GrentonCoordinator(DataUpdateCoordinator):
             values: Parsed values from the report
         """
         clu_state = self.state.clus[clu_id]
-        clu_state.update_state(values)
+        matched = self._matched_values(clu_id, clu_state.get_subscription_order(), values, "Report")
+        if matched is None:
+            return
+        clu_state.update_state(matched)
 
         self.async_set_updated_data(self.state.__dict__)
         # Values arrived in a clientReport -> push origin. Notified only after
         # the new values are stored above.
         self._notify_gesture_listeners(clu_id, "push")
         _LOGGER.debug("[%s] Processed report with %d values", clu_id, len(values))
+
+    def _matched_values(
+        self,
+        clu_id: str,
+        keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey],
+        values: list[GrentonValue],
+        origin: str,
+    ) -> list[GrentonValue] | None:
+        """Return the values to apply to ``keys``, or None to ignore them.
+
+        A report with more values than keys cannot be matched to the keys
+        safely and is ignored. With fewer values (the CLU may leave out
+        trailing nils), the values present are applied to the first keys.
+        Each kind of mismatch is logged once.
+        """
+        if len(values) == len(keys):
+            return values
+        too_many = len(values) > len(keys)
+        log_key = (clu_id, origin, len(keys), len(values))
+        if log_key not in self._count_mismatch_logged:
+            self._count_mismatch_logged.add(log_key)
+            _LOGGER.warning(
+                "[%s] %s has %d values for %d subscribed keys; %s",
+                clu_id, origin, len(values), len(keys),
+                "ignored" if too_many else f"applied to the first {len(values)} keys",
+            )
+        return None if too_many else values
 
     def register_component_state(self, state: GrentonStateObject) -> None:
         self.state.register_state(state)
