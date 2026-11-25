@@ -124,8 +124,10 @@ class GrentonCluState:
     
     def _cast_value(self, value: Any) -> GrentonValue:
         """Cast raw string values to appropriate Python types."""
-        # Handle already proper types
-        if isinstance(value, (bool, int, float, str)):
+        # Handle already proper types. None is a Lua nil from the CLU and is
+        # kept as None, the same as in a pushed report; str(None) would show
+        # it as the text "None".
+        if value is None or isinstance(value, (bool, int, float, str)):
             return value
         
         # Convert string representations to proper types

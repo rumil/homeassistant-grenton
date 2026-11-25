@@ -519,3 +519,19 @@ def test_string_with_comma_does_not_shift_later_values(tmp_path, monkeypatch):
             await teardown(h)
 
     run(scenario())
+
+
+def test_nil_in_register_answer_shows_unknown_not_off(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            h.fake.outputs = {"DOU0001": "nil", "DOU0002": 1}
+            await h.coordinator._send_register(CLU_ID)
+            await h.settle()
+            assert h.coordinator.get_value_for_component(h.switches[0].state_object) is None
+            assert h.switches[0].is_on is None
+            assert h.switches[1].is_on is True
+        finally:
+            await teardown(h)
+
+    run(scenario())
