@@ -360,3 +360,17 @@ def test_default_timeouts():
     # Hang detection is built on 5 s pings; registrations get as long.
     assert clu_api.PING_TIMEOUT == 5.0
     assert clu_api.REGISTER_TIMEOUT >= clu_api.ACTION_TIMEOUT
+
+
+def test_request_too_long_for_the_clu_is_not_sent(caplog):
+    async def run():
+        api, transport = make_api(response_timeout=0.05)
+        result = await api.execute_action(set_action("DOU0001", value="x" * 1500))
+        return result, transport
+
+    with caplog.at_level(logging.ERROR, logger=clu_api.__name__):
+        result, transport = asyncio.run(run())
+
+    assert result is clu_api.ActionResult.FAILED
+    assert transport.sent == []
+    assert any("too long for the CLU" in r.getMessage() for r in caplog.records)

@@ -47,6 +47,11 @@ CLU_ID = "CLU221010475"
 CLU_IP = "192.168.1.10"
 
 
+def register_session_id(payload):
+    """Session ID of a SYSTEM:clientRegister(0,0,<id>,{...}) call."""
+    return int(payload[len("SYSTEM:clientRegister(0,0,"):].split(",", 1)[0])
+
+
 class FakeClu:
     """Fake UDP transport answering like a CLU with one gesture variable."""
 
@@ -57,19 +62,22 @@ class FakeClu:
         # value = seq * 10 + code, see gesture_decoder
         self.gesture = 0
 
+    session_id = None
+
     def sendto(self, data, addr):
         plaintext = self.cipher.decrypt(data).decode()
         _, _, msg_id, payload = plaintext.split(":", 3)
         if self.hung:
             return
         if payload.startswith("SYSTEM:clientRegister"):
-            answer = f"clientReport:abcd:{{{self.gesture}}}"
+            self.session_id = register_session_id(payload)
+            answer = f"clientReport:{self.session_id}:{{{self.gesture}}}"
         else:
             answer = "0"
         asyncio.get_running_loop().call_soon(self._respond, msg_id, answer)
 
     def push_report(self):
-        self._respond("00000000", f"clientReport:abcd:{{{self.gesture}}}")
+        self._respond("00000000", f"clientReport:{self.session_id}:{{{self.gesture}}}")
 
     def answer_then_push(self, answer_value, push_value):
         """Answer the next clientRegister, then push a newer value at once.
@@ -85,10 +93,11 @@ class FakeClu:
             if not payload.startswith("SYSTEM:clientRegister"):
                 return original(data, addr)
             self.sendto = original
+            session_id = register_session_id(payload)
 
             def deliver():
-                self._respond(msg_id, f"clientReport:abcd:{{{answer_value}}}")
-                self._respond("00000000", f"clientReport:abcd:{{{push_value}}}")
+                self._respond(msg_id, f"clientReport:{session_id}:{{{answer_value}}}")
+                self._respond("00000000", f"clientReport:{session_id}:{{{push_value}}}")
 
             asyncio.get_running_loop().call_soon(deliver)
 

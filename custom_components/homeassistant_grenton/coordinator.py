@@ -17,6 +17,7 @@ from .domain.state_object import GrentonStateObject
 from .domain.action import GrentonAction
 from .domain.api.clu import ActionResult, GrentonCluApi
 from .domain.connectivity import CluConnectivity, ConnectivityTransition
+from .domain.registration import RegistrationSession, plan_sessions
 from .state import GrentonState, GrentonCluState, GrentonCluStateVariableKey, GrentonCluStateAttributeKey, GrentonValue
 from .domain.api.clu_messages import GrentonCluApiActionRequest
 
@@ -57,6 +58,12 @@ class GrentonCoordinator(DataUpdateCoordinator):
 
         # Value-count mismatches already logged, so each is logged once.
         self._count_mismatch_logged: set[tuple[str, str, int, int]] = set()
+        # clientRegister sessions per CLU, planned from its subscribed keys,
+        # and the number of keys they were planned for.
+        self._sessions: dict[str, list[RegistrationSession]] = {}
+        self._planned_key_count: dict[str, int] = {}
+        # Report session IDs that matched no session, logged once each.
+        self._unknown_sessions_logged: set[tuple[str, int]] = set()
 
         # Listeners for gesture entities. Each entry pairs the entity's state
         # object with a synchronous callback receiving (value, origin), where
@@ -211,55 +218,85 @@ class GrentonCoordinator(DataUpdateCoordinator):
             except Exception as e:
                 _LOGGER.error("Unexpected error in ping loop: %s", e)
     
-    async def _send_register(self, clu_id: str) -> bool:
-        """Register the client report and store the values from the response.
+    def _get_sessions(self, clu_id: str) -> list[RegistrationSession]:
+        """The clientRegister sessions of a CLU, planned on first use.
         
-        The values are applied the moment the answer arrives, in order with
-        pushed reports (see ``_apply_register_values``).
+        Planned again if keys were subscribed after the last plan.
+        """
+        keys = self.state.clus[clu_id].get_subscription_order()
+        if self._planned_key_count.get(clu_id) != len(keys):
+            sessions = plan_sessions(list(keys), self._apis[clu_id].first_session_id)
+            self._sessions[clu_id] = sessions
+            self._planned_key_count[clu_id] = len(keys)
+            _LOGGER.debug("[%s] Subscribing %d keys in %d session(s): %s", clu_id, len(keys),
+                          len(sessions), ", ".join(f"{s.session_id} ({len(s.keys)} keys)" for s in sessions))
+        return self._sessions.get(clu_id, [])
+    
+    def _find_session(self, clu_id: str, session_id: int) -> RegistrationSession | None:
+        for session in self._sessions.get(clu_id, []):
+            if session.session_id == session_id:
+                return session
+        return None
+    
+    async def _register_sessions(
+        self, clu_id: str, sessions: list[RegistrationSession]
+    ) -> list[RegistrationSession]:
+        """Register (or renew) sessions one after another. Returns the failed ones.
         
-        Returns True when the state was refreshed from the CLU.
+        The values of each answer are applied the moment it arrives, in order
+        with pushed reports (see ``_apply_register_values``).
         """
         api = self._apis.get(clu_id)
         if not api:
             _LOGGER.warning("[%s] No API found for CLU during state registration", clu_id)
+            return list(sessions)
+        
+        failed: list[RegistrationSession] = []
+        for session in sessions:
+            try:
+                values = await api.register_session(
+                    session,
+                    on_values=lambda values, keys=session.keys, sid=session.session_id:
+                        self._apply_register_values(clu_id, keys, values, sid),
+                )
+            except Exception as e:
+                _LOGGER.error("[%s] Error during registration: %s", clu_id, e)
+                values = None
+            if values is None:
+                failed.append(session)
+        return failed
+    
+    async def _send_register(self, clu_id: str) -> bool:
+        """Register every session of a CLU and store the values from the answers.
+        
+        Returns True when the whole state was refreshed from the CLU.
+        """
+        if clu_id not in self._apis:
+            _LOGGER.warning("[%s] No API found for CLU during state registration", clu_id)
             return False
         
-        clu_state = self.state.clus[clu_id]
-        
-        # Check if there are any states to register
-        if not clu_state.has_states_to_register():
+        if not self.state.clus[clu_id].has_states_to_register():
             _LOGGER.debug("[%s] No component states to register", clu_id)
             return True
         
-        keys = list(clu_state.get_subscription_order())
-        try:
-            values = await api.register_component_states(
-                keys, on_values=lambda values: self._apply_register_values(clu_id, keys, values)
-            )
-        except Exception as e:
-            _LOGGER.error("[%s] Error during registration: %s", clu_id, e)
-            return False
-        return values is not None
+        failed = await self._register_sessions(clu_id, self._get_sessions(clu_id))
+        return not failed
     
     @callback
     def _apply_register_values(
         self,
         clu_id: str,
-        keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey],
+        keys: tuple[GrentonCluStateVariableKey | GrentonCluStateAttributeKey, ...],
         values: list[GrentonValue],
+        session_id: int,
     ) -> bool:
         """Store the values of a register answer. Returns False to reject them."""
         if not values:
             return False
-        matched = self._matched_values(clu_id, keys, values, "Register answer")
+        matched = self._matched_values(clu_id, list(keys), values, f"Register answer of session {session_id}")
         if matched is None:
             return False
-        clu_state = self.state.clus[clu_id]
-        for key, value in zip(keys, matched):
-            if isinstance(key, GrentonCluStateVariableKey):
-                clu_state.set_variable(key, value)
-            elif isinstance(key, GrentonCluStateAttributeKey): # type: ignore
-                clu_state.set_attribute(key, value)
+        self.state.clus[clu_id].apply_values(keys, matched)
         self.async_set_updated_data(self.state.__dict__)
         # Values arrived in a register response -> resync origin.
         self._notify_gesture_listeners(clu_id, "resync")
@@ -335,24 +372,31 @@ class GrentonCoordinator(DataUpdateCoordinator):
             )
     
     @callback
-    def _process_report(self, clu_id: str, values: list[GrentonValue]) -> None:
-        """Process a report from a CLU and update state values.
+    def _process_report(self, clu_id: str, session_id: int, values: list[GrentonValue]) -> None:
+        """Process a report pushed by a CLU for one of its sessions.
         
         Args:
             clu_id: The CLU identifier
-            values: Parsed values from the report
+            session_id: The session the report belongs to
+            values: Parsed values, in the order of the session's keys
         """
-        clu_state = self.state.clus[clu_id]
-        matched = self._matched_values(clu_id, clu_state.get_subscription_order(), values, "Report")
+        session = self._find_session(clu_id, session_id)
+        if session is None:
+            # E.g. a session of an earlier run that has not expired yet.
+            if (clu_id, session_id) not in self._unknown_sessions_logged:
+                self._unknown_sessions_logged.add((clu_id, session_id))
+                _LOGGER.debug("[%s] Ignoring report of unknown session %d", clu_id, session_id)
+            return
+        matched = self._matched_values(clu_id, list(session.keys), values, f"Report of session {session_id}")
         if matched is None:
             return
-        clu_state.update_state(matched)
+        self.state.clus[clu_id].apply_values(session.keys, matched)
 
         self.async_set_updated_data(self.state.__dict__)
         # Values arrived in a clientReport -> push origin. Notified only after
         # the new values are stored above.
         self._notify_gesture_listeners(clu_id, "push")
-        _LOGGER.debug("[%s] Processed report with %d values", clu_id, len(values))
+        _LOGGER.debug("[%s] Processed report of session %d with %d values", clu_id, session_id, len(values))
 
     def _matched_values(
         self,
@@ -456,7 +500,9 @@ class GrentonCoordinator(DataUpdateCoordinator):
             
             # Set subscription callback to handle reports
             if api.protocol:
-                api.protocol.subscription_callback = lambda values: self._process_report(api.clu.id, values)
+                api.protocol.subscription_callback = (
+                    lambda session_id, values: self._process_report(api.clu.id, session_id, values)
+                )
                 api.protocol.contact_callback = lambda: self._handle_contact(api.clu.id)
             else:
                 _LOGGER.error("Failed to set subscription callback for CLU %s", api.clu.id)

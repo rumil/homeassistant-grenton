@@ -9,8 +9,9 @@ import secrets
 from ..clu import GrentonClu
 from ..encryption import GrentonEncryption
 from ..action import GrentonAction
-from ...state import GrentonCluStateVariableKey, GrentonCluStateAttributeKey, GrentonValue
+from ...state import GrentonValue
 from ..cipher import GrentonCipher
+from ..registration import MAX_REQUEST_BYTES, RegistrationSession
 from .clu_messages import (
     GrentonCluApiMessageParser,
     GrentonCluApiPingRequest,
@@ -78,7 +79,10 @@ class GrentonCluApi:
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.protocol: Optional[GrentonCluApiProtocol] = None
         self.keep_alive_id = secrets.token_hex(4)
-        self.subscription_id = secrets.token_hex(4)
+        # Session IDs of this client's clientRegister sessions start here.
+        # Random per socket, so sessions of an earlier run (still alive on
+        # the CLU until they expire) never share an ID with the new ones.
+        self.first_session_id = 10000 + secrets.randbelow(50000)
         # Sequence number of the newest action per write target, so a retry
         # can tell that a newer write to the same target is waiting.
         self._action_counter = 0
@@ -130,12 +134,12 @@ class GrentonCluApi:
         
         return True
     
-    async def register_component_states(
+    async def register_session(
         self,
-        keys: list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey],
+        session: RegistrationSession,
         on_values: Optional[Callable[[list[GrentonValue]], bool]] = None,
     ) -> list[GrentonValue] | None:
-        """Register component state keys with the CLU.
+        """Register (or renew) one clientRegister session with the CLU.
         
         ``on_values`` is called with the values of the answer as soon as the
         answer is received, before any datagram that arrived after it is
@@ -146,7 +150,7 @@ class GrentonCluApi:
         Returns the values of the answer, or None when the registration
         failed.
         """
-        if not keys:
+        if not session.keys:
             _LOGGER.debug("[%s] No state keys to register", self.clu.id)
             return None
         
@@ -156,15 +160,19 @@ class GrentonCluApi:
         
         def handle_answer(wire_message: str) -> list[GrentonValue] | None:
             try:
-                values = GrentonCluApiClientRegisterResponse(wire_message).values
+                response = GrentonCluApiClientRegisterResponse(wire_message)
             except ValueError as e:
                 _LOGGER.warning("[%s] Failed to parse register response: %s", self.clu.id, e)
                 return None
-            if on_values is not None and not on_values(values):
+            if response.session_id != session.session_id:
+                _LOGGER.warning("[%s] Register answer for session %d, expected %d; ignored",
+                                self.clu.id, response.session_id, session.session_id)
                 return None
-            return values
+            if on_values is not None and not on_values(response.values):
+                return None
+            return response.values
         
-        request = GrentonCluApiClientRegisterRequest(keys, self.subscription_id)
+        request = GrentonCluApiClientRegisterRequest(list(session.keys), session.session_id)
         request.on_response = handle_answer
         return await self.protocol.send_request(request)
     
@@ -241,9 +249,9 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         self._slots = asyncio.Semaphore(MAX_IN_FLIGHT_REQUESTS)
         self._waiting = 0
         self._in_flight = 0
-        # Called with the values of every pushed clientReport, in the order
-        # the reports arrive.
-        self.subscription_callback: Optional[Callable[[list[GrentonValue]], None]] = None
+        # Called with the session ID and values of every pushed clientReport,
+        # in the order the reports arrive.
+        self.subscription_callback: Optional[Callable[[int, list[GrentonValue]], None]] = None
         # Called for every valid message received from the CLU (responses,
         # including late ones, and client reports): proof that it is alive.
         self.contact_callback: Optional[Callable[[], None]] = None
@@ -326,7 +334,7 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
                     _LOGGER.error("[%s] Failed to parse client report: %s", self.api.clu.name, e)
                     return
                 try:
-                    self.subscription_callback(notification.values)
+                    self.subscription_callback(notification.session_id, notification.values)
                 except Exception as e:  # pragma: no cover - defensive
                     _LOGGER.error("[%s] Error handling client report: %s", self.api.clu.name, e)
             else:
@@ -360,11 +368,8 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
             return None
         
         msg_id = request.msg_id
-        payload = request.raw.encode()
-        encrypted = self.api.cipher.encrypt(payload)
-        
+        encrypted = self._encrypt(request)
         if encrypted is None:
-            _LOGGER.error("[%s] Failed to encrypt request", self.api.clu.name)
             return None
         
         _LOGGER.debug("[%s][%s] Queued (waiting: %d, in flight: %d/%d)",
@@ -398,11 +403,27 @@ class GrentonCluApiProtocol(asyncio.DatagramProtocol):
         if not self.api.transport:
             _LOGGER.error("[%s] Transport not ready", self.api.clu.name)
             return None
+        encrypted = self._encrypt(request)
+        if encrypted is None:
+            return None
+        return await self._send_and_wait(request, request.msg_id, encrypted, timeout_log_level)
+    
+    def _encrypt(self, request: Any) -> Optional[bytes]:
+        """Encrypt a request, refusing one too long for the CLU.
+        
+        The CLU drops a request longer than one Ethernet frame without an
+        answer, so sending it would only end in a timeout.
+        """
         encrypted = self.api.cipher.encrypt(request.raw.encode())
         if encrypted is None:
             _LOGGER.error("[%s] Failed to encrypt request", self.api.clu.name)
             return None
-        return await self._send_and_wait(request, request.msg_id, encrypted, timeout_log_level)
+        if len(encrypted) > MAX_REQUEST_BYTES:
+            _LOGGER.error("[%s][%s] Request too long for the CLU (%d bytes, at most %d); not sent: %s",
+                          self.api.clu.name, request.msg_id, len(encrypted), MAX_REQUEST_BYTES,
+                          request.payload)
+            return None
+        return encrypted
     
     async def _send_and_wait(
         self,

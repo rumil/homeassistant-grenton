@@ -9,6 +9,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -117,10 +118,18 @@ from custom_components.homeassistant_grenton.domain.state_object import (  # noq
     GrentonAttributeValueObject,
 )
 from custom_components.homeassistant_grenton.mappers.device_clu import DeviceCluMapper  # noqa: E402
+from custom_components.homeassistant_grenton.domain import registration  # noqa: E402
+
+
+REGISTER_RE = re.compile(r"^SYSTEM:clientRegister\(0,0,(\d+),\{(.*)\}\)$")
 
 
 class FakeClu:
-    """Fake UDP transport answering like a CLU with two digital outputs."""
+    """Fake UDP transport answering like a CLU with two digital outputs.
+
+    Like a real CLU it keeps the registered sessions and repeats their
+    session ID in every report.
+    """
 
     def __init__(self, protocol, cipher):
         self.protocol = protocol
@@ -128,6 +137,8 @@ class FakeClu:
         self.hung = False
         self.outputs = {"DOU0001": 1, "DOU0002": 0}
         self.sent: list[str] = []
+        # session ID -> object names, in registration order
+        self.sessions: dict[int, list[str]] = {}
 
     def sendto(self, data, addr):
         plaintext = self.cipher.decrypt(data).decode()
@@ -135,19 +146,27 @@ class FakeClu:
         self.sent.append(payload)
         if self.hung:
             return
-        if payload.startswith("SYSTEM:clientRegister"):
-            values = ",".join(str(self.outputs[name]) for name in ("DOU0001", "DOU0002"))
-            answer = f"clientReport:abcd:{{{values}}}"
+        match = REGISTER_RE.match(payload)
+        if match:
+            session_id = int(match.group(1))
+            self.sessions[session_id] = re.findall(r"\{(\w+),\d+\}", match.group(2))
+            answer = self._report(session_id)
         else:
             answer = "0"
         asyncio.get_running_loop().call_soon(self._respond, msg_id, answer)
 
-    def push_report(self):
-        values = ",".join(str(self.outputs[name]) for name in ("DOU0001", "DOU0002"))
-        self._respond("00000000", f"clientReport:abcd:{{{values}}}")
+    def _report(self, session_id):
+        values = ",".join(str(self.outputs[name]) for name in self.sessions[session_id])
+        return f"clientReport:{session_id}:{{{values}}}"
 
-    def push_raw(self, table):
-        self._respond("00000000", f"clientReport:abcd:{table}")
+    def push_report(self):
+        for session_id in self.sessions:
+            self._respond("00000000", self._report(session_id))
+
+    def push_raw(self, table, session_id=None):
+        if session_id is None:
+            session_id = next(iter(self.sessions))
+        self._respond("00000000", f"clientReport:{session_id}:{table}")
 
     def _respond(self, msg_id, payload):
         wire = f"resp:{CLU_IP}:{msg_id}:{payload}".encode()
@@ -488,7 +507,9 @@ def test_report_with_too_many_values_is_ignored(tmp_path, monkeypatch, caplog):
         run(scenario())
 
     warnings = [r.getMessage() for r in caplog.records if "values for 2 subscribed keys" in r.getMessage()]
-    assert warnings == ["[CLU221010475] Report has 3 values for 2 subscribed keys; ignored"]
+    assert len(warnings) == 1
+    assert re.fullmatch(r"\[CLU221010475\] Report of session \d+ has 3 values for 2 subscribed keys; ignored",
+                        warnings[0])
 
 
 def test_report_with_fewer_values_updates_first_keys(tmp_path, monkeypatch, caplog):
@@ -559,6 +580,55 @@ def test_unconfirmed_action_raises(tmp_path, monkeypatch):
             # The CLU still answers pings: the CLU stays connected.
             await h.ping()
             assert h.sensor.is_on is True
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_each_session_is_registered_and_reports_only_its_keys(tmp_path, monkeypatch):
+    # One entry per session, so the two switches are in two sessions.
+    monkeypatch.setattr(registration, "MAX_ENTRIES_PER_SESSION", 1)
+
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            sessions = h.coordinator._get_sessions(CLU_ID)
+            assert [len(s.keys) for s in sessions] == [1, 1]
+            assert sorted(h.fake.sessions) == [s.session_id for s in sessions]
+            assert h.switches[0].is_on is True
+            assert h.switches[1].is_on is False
+
+            # A report of the second session updates only the second switch.
+            h.fake.push_raw("{1}", session_id=sessions[1].session_id)
+            await h.settle()
+            assert h.switches[0].is_on is True
+            assert h.switches[1].is_on is True
+
+            # A report of a session this client does not have is ignored.
+            h.fake.push_raw("{0}", session_id=1)
+            await h.settle()
+            assert h.switches[0].is_on is True
+            assert h.switches[1].is_on is True
+        finally:
+            await teardown(h)
+
+    run(scenario())
+
+
+def test_register_answer_for_another_session_fails_the_registration(tmp_path, monkeypatch):
+    async def scenario():
+        h = await setup_harness(tmp_path, monkeypatch)
+        try:
+            original_report = h.fake._report
+            h.fake._report = lambda session_id: original_report(session_id).replace(
+                f"clientReport:{session_id}:", "clientReport:1:"
+            )
+            h.fake.outputs = {"DOU0001": 0, "DOU0002": 1}
+            assert await h.coordinator._send_register(CLU_ID) is False
+            # Values meant for another session were not applied.
+            assert h.switches[0].is_on is True
+            assert h.switches[1].is_on is False
         finally:
             await teardown(h)
 

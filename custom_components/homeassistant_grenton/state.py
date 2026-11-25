@@ -149,19 +149,25 @@ class GrentonCluState:
         """Get the order for subscription registration."""
         return self._subscription_order
     
+    def apply_values(
+        self,
+        keys: "list[GrentonCluStateVariableKey | GrentonCluStateAttributeKey] | tuple[GrentonCluStateVariableKey | GrentonCluStateAttributeKey, ...]",
+        values: list[GrentonValue],
+    ) -> None:
+        """Store values reported for ``keys``, matched by position."""
+        for key, value in zip(keys, values):
+            if isinstance(key, GrentonCluStateVariableKey):
+                self.set_variable(key, value)
+            else:
+                self.set_attribute(key, value)
+    
     def update_state(self, values: list[GrentonValue]) -> None:
         """Update state with report values.
         
         Args:
             values: List of values in subscription order
         """
-        keys = self.get_subscription_order()
-        
-        for key, value in zip(keys, values):
-            if isinstance(key, GrentonCluStateVariableKey):
-                self.variables[key].value = value
-            else:
-                self.attributes[key].value = value
+        self.apply_values(self.get_subscription_order(), values)
 
 
 @dataclass
